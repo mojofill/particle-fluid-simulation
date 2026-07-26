@@ -1,0 +1,132 @@
+#version 450
+
+#define WORKGROUP_SIZE_X 128
+layout (local_size_x = WORKGROUP_SIZE_X) in;
+layout(binding = 0) uniform UniformBufferObject {
+    mat4 model;
+    mat4 view;
+    mat4 proj;
+    int numParticles;
+    float particleRadius;
+    float smoothingRadius;
+    float g;
+    vec3 minXYZ;
+    float dt;
+    vec3 maxXYZ;
+    float pad0;
+    float particleMass;
+    float pressureMultiplier;
+    float targetDensity;
+    float viscosityStrength;
+    float volume;
+};
+struct CellEntry {
+    uint key;
+    uint particleIndex;
+};
+layout (binding = 1, rgba32f) uniform writeonly image2D outputImage;
+layout (std430, binding = 2)  buffer PositionsBuffer           { vec4 positions[]; };
+layout (std430, binding = 3)  buffer VelocitiesBuffer          { vec4 velocities[]; };
+layout (std430, binding = 4)  buffer PredictedPositionsBuffer  { vec4 predictedPositions[]; };
+layout (std430, binding = 5)  buffer PredictedVelocitiesBuffer { vec4 predictedVelocities[]; };
+layout (std430, binding = 6)  buffer CellEntriesBuffer         { CellEntry cellEntries[]; };
+layout (std430, binding = 7)  buffer DensitiesBuffer           { float densities[]; };
+layout (std430, binding = 8)  buffer StartIndices              { int startIndices[]; };
+layout (std430, binding = 9)  buffer ColorBuffer               { vec4 colors[]; };
+// ... buffers in between are for ping pong, which arent needed in this shader
+layout (std430, binding = 18) buffer EndIndicesBuffer          { int endIndices[]; };
+
+uint cellCoordToHash(uvec3 cellCoord) {
+    uvec3 cell = uvec3(cellCoord);
+
+    uint h =
+        cell.x * 73856093u ^
+        cell.y * 19349663u ^
+        cell.z * 83492791u;
+
+    // Avalanche finalizer
+    h ^= h >> 16;
+    h *= 0x7feb352du;
+    h ^= h >> 15;
+    h *= 0x846ca68bu;
+    h ^= h >> 16;
+
+    return h;
+}
+
+uint cellHashToKey(uint cellHash) {
+    // numParticles must be a power of two
+    return cellHash & uint(numParticles - 1);
+}
+
+uint cellCoordToKey(uvec3 cellCoord) {
+    return cellHashToKey(cellCoordToHash(cellCoord));
+}
+
+uint samplePointToKey(vec3 point) {
+    if (any(lessThan(point, minXYZ)) || any(greaterThan(point, maxXYZ))) return -1;
+    ivec3 cellCoord = ivec3(floor((point - minXYZ) / smoothingRadius));
+    return cellCoordToKey(cellCoord);
+}
+
+const float PI = 3.14159265359f;
+
+float smoothingKernel(float dist) {
+    if (dist >= smoothingRadius) return 0;
+    return (smoothingRadius - dist) * (smoothingRadius - dist);
+}
+
+float smoothingKernelDerivative(float dist) {
+    if (dist >= smoothingRadius) return 0.0f;
+    
+    // Scale factor derived from dividing the raw derivative 2*(dist - R) 
+    // by the 3D volume integration (2 * PI * R^5) / 15
+    float scale = 15.0f / (PI * pow(smoothingRadius, 5));
+    return (dist - smoothingRadius) * scale;
+}
+
+float calculateDensity(vec3 samplePoint) {
+    /*
+    loop through all particles within smoothingRadius of samplePoint
+    can do this via space partitioning
+    however, instead of doing a large 2D cell with lists
+    will use a GPU friendly data structure that sebastian lague will show later
+
+    totalMass = 0
+    for each particle within smoothingRadius of samplePoint do
+        totalMass += particleMass * "influence" of particle, where each particle has mass = 1 for now
+        where influence = smoothingKernel(dist, where dist = magnitude(particle.position - samplePoint))
+    return totalMass / volume
+    */
+
+    float totalMass = 0;
+    for (int dz = -1; dz <= 1; dz++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                uint cellKey = samplePointToKey(samplePoint + smoothingRadius * vec3(dx, dy, dz));
+                if (cellKey == -1) continue; // skip this cell, its out of bounds
+                int startIndex = startIndices[cellKey];
+                if (startIndex == -1) continue; // no particles at cell, cell contributes nothing to totalMass
+                int endIndex = endIndices[cellKey];
+                for (int i = startIndex; i < endIndex; i++) {
+                    vec3 particlePos = predictedPositions[i].xyz;
+                    float dist = distance(particlePos, samplePoint);
+                    float influence = smoothingKernel(dist);
+                    totalMass += particleMass * influence;
+                }
+            }
+        }
+    }
+
+    return totalMass / volume;
+}
+
+void main() {
+    if (gl_GlobalInvocationID.x >= numParticles) return;
+
+    int particleIndex = int(gl_GlobalInvocationID.x);
+    vec3 predictedPos = predictedPositions[particleIndex].xyz;
+
+    densities[particleIndex] = calculateDensity(predictedPos);
+    densities[particleIndex] = max(0.01, densities[particleIndex]); // can try taking this out to see if its better later
+}

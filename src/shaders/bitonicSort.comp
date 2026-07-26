@@ -1,0 +1,184 @@
+#version 450
+
+#define WORKGROUP_SIZE_X 128
+layout (local_size_x = WORKGROUP_SIZE_X) in; // 1024 threads is the hardware limit
+layout(binding = 0) uniform UniformBufferObject {
+    mat4 model;
+    mat4 view;
+    mat4 proj;
+    int numParticles;
+    float particleRadius;
+    float smoothingRadius;
+    float g;
+    vec3 minXYZ;
+    float dt;
+    vec3 maxXYZ;
+    float pad0;
+    float particleMass;
+    float pressureMultiplier;
+    float targetDensity;
+    float viscosityStrength;
+};
+struct CellEntry {
+    uint key;
+    uint particleIndex;
+};
+layout (binding = 1, rgba32f) uniform writeonly image2D outputImage;
+layout (std430, binding = 2)  buffer PositionsBuffer           { vec4 positions[]; };
+layout (std430, binding = 3)  buffer VelocitiesBuffer          { vec4 velocities[]; };
+layout (std430, binding = 4)  buffer PredictedPositionsBuffer  { vec4 predictedPositions[]; };
+layout (std430, binding = 5)  buffer PredictedVelocitiesBuffer { vec4 predictedVelocities[]; };
+layout (std430, binding = 6)  buffer CellEntriesBuffer         { CellEntry cellEntries[]; };
+layout (std430, binding = 7)  buffer DensitiesBuffer           { float densities[]; };
+layout (std430, binding = 8)  buffer StartIndices              { int startIndices[]; };
+layout (std430, binding = 9)  buffer ColorBuffer               { vec4 colors[]; };
+layout (std430, binding = 10) buffer CellEntriesOutputBuffer   { CellEntry cellEntriesOutput[]; };
+
+layout (push_constant, std430) uniform PushConstants {
+    int algorithm;
+    int h;
+} parameters;
+
+#define NUM_PARTICLES 2048
+
+#define LOCAL_BMS 0
+#define BIG_MAIN_BLOCK 1
+#define LOCAL_CASCADING 2
+#define BIG_CASCADING 3
+
+shared CellEntry local_value[gl_WorkGroupSize.x * 2];
+
+void local_comp(int a, int b) {
+    if (local_value[a].key > local_value[b].key) {
+        CellEntry t = local_value[a];
+        local_value[a] = local_value[b];
+        local_value[b] = t;
+    }
+}
+
+void global_comp(int a, int b) {
+    if (cellEntries[a].key > cellEntries[b].key) {
+        CellEntry t = cellEntries[a];
+        cellEntries[a] = cellEntries[b];
+        cellEntries[b] = t;
+    }
+}
+
+void sortLocalMainBlock(int h) {
+    uint tid = gl_LocalInvocationID.x;
+
+    uint comparisonsPerBlock = uint(h) / 2;
+    uint block = tid / comparisonsPerBlock;
+    uint local = tid % comparisonsPerBlock;
+
+    uint base = block * uint(h);
+
+    uint a = base + local;
+    uint b = base + uint(h) - 1 - local;
+
+    barrier();
+
+    if (b < gl_WorkGroupSize.x * 2)
+        local_comp(int(a), int(b));
+
+    barrier();
+}
+
+void sortBigMainBlock(int h) {
+    uint tid = gl_GlobalInvocationID.x;
+
+    uint comparisonsPerBlock = uint(h) / 2;
+    uint block = tid / comparisonsPerBlock;
+    uint local = tid % comparisonsPerBlock;
+
+    uint base = block * uint(h);
+
+    uint a = base + local;
+    uint b = base + uint(h) - 1 - local;
+
+    if (b < uint(numParticles)) global_comp(int(a), int(b));
+}
+
+void sortLocalCascadingBlock(int hh) {
+    uint tid = gl_LocalInvocationID.x;
+
+    uint comparisonsPerBlock = uint(hh) / 2;
+    uint block = tid / comparisonsPerBlock;
+    uint local = tid % comparisonsPerBlock;
+
+    uint base = block * uint(hh);
+
+    uint a = base + local;
+    uint b = base + local + comparisonsPerBlock;
+
+    barrier();
+
+    if (b < gl_WorkGroupSize.x * 2)
+        local_comp(int(a), int(b));
+
+    barrier();
+}
+
+void sortBigCascadingBlock(int hh) {
+    uint tid = gl_GlobalInvocationID.x;
+
+    uint comparisonsPerBlock = uint(hh) / 2;
+    uint block = tid / comparisonsPerBlock;
+    uint local = tid % comparisonsPerBlock;
+
+    uint base = block * uint(hh);
+
+    uint a = base + local;
+    uint b = base + local + uint(hh) / 2;
+
+    if (b < uint(numParticles)) global_comp(int(a), int(b));
+}
+
+void local_bms(int max_local_h){
+    for (int h = 2; h <= max_local_h; h *= 2) {
+        sortLocalMainBlock(h);
+        for (int hh = h/2; hh > 1; hh /= 2) { // remaining cascading blocks
+            // sort cascading block
+            sortLocalCascadingBlock(hh);
+        }
+    }
+}
+
+void main() {
+    if (gl_GlobalInvocationID.x >= numParticles/2) return;
+
+    int t = int(gl_LocalInvocationID.x);
+    int offset = int(gl_WorkGroupSize.x * 2 * gl_WorkGroupID.x);
+
+    if (parameters.algorithm == LOCAL_BMS || parameters.algorithm == LOCAL_CASCADING) {
+        // Each local worker must save two elements to local memory, as there
+        // are twice as many elments as workers.
+        local_value[t*2]   = cellEntries[offset + t*2];
+        local_value[t*2+1] = cellEntries[offset + t*2+1];
+    }
+
+    switch (parameters.algorithm) {
+        case LOCAL_BMS: {
+            local_bms(parameters.h);
+            break;
+        }
+        case BIG_MAIN_BLOCK: {
+            sortBigMainBlock(parameters.h);
+            break;
+        }
+        case LOCAL_CASCADING: {
+            sortLocalCascadingBlock(parameters.h);
+            break;
+        }
+        case BIG_CASCADING: {
+            sortBigCascadingBlock(parameters.h);
+            break;
+        }
+    }
+
+    if (parameters.algorithm == LOCAL_BMS || parameters.algorithm == LOCAL_CASCADING) {
+        // Write local memory back to buffer
+        cellEntries[offset + t*2]   = local_value[t*2];
+        cellEntries[offset + t*2+1] = local_value[t*2+1];
+    }
+}
