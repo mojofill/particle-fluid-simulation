@@ -31,6 +31,11 @@ glslc src/shaders/updateStartIndices.comp -o "$SPV_DIR/updateStartIndices.spv"
 glslc src/shaders/applyPressureAndViscosityForce.comp -o "$SPV_DIR/applyPressureAndViscosityForce.spv"
 glslc src/shaders/scatterPass.comp -o "$SPV_DIR/scatterPass.spv"
 glslc src/shaders/multiRadixSort.comp -o "$SPV_DIR/multiRadixSort.spv" --target-env=vulkan1.1
+glslc src/shaders/raymarchShader.vert -o "$SPV_DIR/raymarchVert.spv"
+glslc src/shaders/raymarchShader.frag -o "$SPV_DIR/raymarchFrag.spv"
+glslc src/shaders/updateDensityMap.comp -o "$SPV_DIR/updateDensityMap.spv"
+glslc src/shaders/calculateLightVolume.comp -o "$SPV_DIR/calculateLightVolume.spv"
+glslc src/shaders/properFluid.comp -o "$SPV_DIR/properFluid.spv"
 
 echo "Configuring CMake..."
 cmake -S . -B "$BUILD_DIR" \

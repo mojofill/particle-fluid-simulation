@@ -39,7 +39,8 @@ void createPipeline(
     int depthTestEnable,
     int depthWriteEnable,
     VkCullModeFlagBits cullMode,
-    VkPipeline *destPipeline
+    VkPipeline *pPipeline,
+    VkPipelineLayout *pPipelineLayout
 ) {
     VkShaderModule vertexShaderModule = load_shader(vko->device, vert_path);
     VkShaderModule fragmentShaderModule = load_shader(vko->device, frag_path);
@@ -148,7 +149,7 @@ void createPipeline(
     pipelineLayoutInfo.pushConstantRangeCount = 0;
 
     // should create an independent layout for each layout, but this works for now
-    if (vko->graphicsPipelineLayout == NULL) vkCreatePipelineLayout(vko->device, &pipelineLayoutInfo, NULL, &vko->graphicsPipelineLayout);
+    if (*pPipelineLayout == NULL) vkCreatePipelineLayout(vko->device, &pipelineLayoutInfo, NULL, pPipelineLayout);
 
     // now finally, put everything together into a graphics pipeline object
     VkGraphicsPipelineCreateInfo pipelineInfo = {0};
@@ -163,14 +164,14 @@ void createPipeline(
     pipelineInfo.pColorBlendState = &colorBlending;
     pipelineInfo.pDepthStencilState = &depthStencil;
     pipelineInfo.pDynamicState = &dynamicState;
-    pipelineInfo.layout = vko->graphicsPipelineLayout;
+    pipelineInfo.layout = *pPipelineLayout;
     pipelineInfo.renderPass = vko->renderPass;
     pipelineInfo.subpass = 0; // ??? i think this is an index? this means it targets subpass 0
     // subpasses are only for render passes aye man these will make sense in the future. think subpasses either read or write to attachments in the swapchain
 
-    if (vkCreateGraphicsPipelines(vko->device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, destPipeline) != VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(vko->device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, pPipeline) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create graphics pipeline\n");
-        VkResult res = vkCreateGraphicsPipelines(vko->device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, destPipeline);
+        VkResult res = vkCreateGraphicsPipelines(vko->device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, pPipeline);
         printf("pipeline result = %d\n", res);
         exit(1);
     }
@@ -229,6 +230,23 @@ void createGraphicsPipeline(vk_context *vko) {
         VK_TRUE, // depth write enable
         // VK_CULL_MODE_BACK_BIT, // cull mode
         VK_CULL_MODE_NONE,
-        &vko->graphicsPipeline
+        &vko->rasterizeGraphicsPipeline,
+        &vko->rasterizeGraphicsPipelineLayout
+    );
+    createPipeline(
+        vko,
+        "./src/spvs/raymarchVert.spv",
+        "./src/spvs/raymarchFrag.spv",
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        vko->bindingDescs,
+        1, // binding description count
+        vko->attrDescs,
+        1, // attribute description count
+        VK_TRUE, // depth test enable
+        VK_TRUE, // depth write enable
+        // VK_CULL_MODE_BACK_BIT, // cull mode
+        VK_CULL_MODE_NONE,
+        &vko->raymarchGraphicsPipeline,
+        &vko->raymarchGraphicsPipelineLayout
     );
 }

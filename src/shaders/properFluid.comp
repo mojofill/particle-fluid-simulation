@@ -1,0 +1,611 @@
+#version 450
+
+layout (local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+struct CellEntry {
+    uint key;
+    uint particleIndex;
+};
+layout (binding = 1, rgba32f) uniform writeonly image2D outputImage;
+layout (std430, binding = 2)  buffer PositionsBuffer           { vec4 positions[]; };
+layout (std430, binding = 3)  buffer VelocitiesBuffer          { vec4 velocities[]; };
+layout (std430, binding = 4)  buffer PredictedPositionsBuffer  { vec4 predictedPositions[]; };
+layout (std430, binding = 5)  buffer PredictedVelocitiesBuffer { vec4 predictedVelocities[]; };
+layout (std430, binding = 6)  buffer CellEntriesBuffer         { CellEntry cellEntries[]; };
+layout (std430, binding = 7)  buffer DensitiesBuffer           { float densities[]; };
+layout (std430, binding = 8)  buffer StartIndices              { int startIndices[]; };
+layout (std430, binding = 9)  buffer ColorBuffer               { vec4 colors[]; };
+// ... buffers in between are for ping pong, which arent needed in this shader
+layout (std430, binding = 18) buffer EndIndicesBuffer          { int endIndices[]; };
+
+layout (std430, binding = 19) buffer NearDensitiesBuffer             { float nearDensities[]; };
+layout (std430, binding = 20) buffer NearDensitiesOutputBuffer       { float nearDensitiesOutput[]; };
+layout (binding = 21, r32f) uniform readonly image3D densityMapImage;
+layout (binding = 22) uniform sampler3D densityMap;
+layout (binding = 24) uniform sampler3D lightVolume;
+
+struct Camera {
+    vec3 position;
+    float padA;
+    vec3 forward;
+    float padB;
+    vec3 right;
+    float padC;
+    vec3 up;
+    float padD;
+
+    // these will only be used on cpu side to compute camera
+    float yaw;
+    float pitch;
+    float lastX;
+    float lastY;
+};
+
+layout(binding = 0) uniform UniformBufferObject {
+    mat4 model;
+    mat4 view;
+    mat4 proj;
+    int numParticles;
+    float particleRadius;
+    float smoothingRadius;
+    float g;
+    vec3 minXYZ;
+    float dt;
+    vec3 maxXYZ;
+    float pad0;
+    float particleMass;
+    float pressureMultiplier;
+    float targetDensity;
+    float visocosityStrength;
+    float volume;
+    float nearPressureMultiplier;
+    int width;
+    int height;
+    float stepSize;
+    int frameCount;
+    float padA;
+    float padB;
+    Camera camera;
+    int renderType;
+    float densityCellSize;
+    float padC;
+    float padD;
+    vec3 extinctionCoefficients;
+    float padE;
+    vec3 dirToSun;
+    float lightMarchStepSize;
+    float FOV;
+    int numRefractions;
+    float surfaceDensityThreshold;
+    float indexOfRefraction;
+};
+
+struct Ray {
+    vec3 origin;
+    vec3 dir;
+};
+
+struct Hit {
+    int didHit;
+    float t;
+    float tNear;
+    float tFar;
+    vec3 position;
+};
+
+const vec3 ambientSkyColor = vec3(0.529, 0.808, 0.922);
+const vec3 skyColor = vec3(0);
+
+#define HIT_MISS 0
+#define HIT_SUCCESS 1
+
+#define AIR 0
+#define FLUID 1
+
+uint state = uint(frameCount * 100);
+
+uint pcg() {
+    uint state_old = state;
+    // LCG step
+    state = state_old * 747796405u + 2891336453u;
+    // Xor shift step
+    uint word = ((state_old >> ((state_old >> 28u) + 4u)) ^ state_old) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// --- Float Conversion ---
+// Returns a pseudo-random float in the range [0.0, 1.0)
+float randf() {
+    // Convert 32-bit int to a float between 0.0 and 1.0
+    return float(pcg()) / 4294967296.0;
+}
+
+uint cellCoordToHash(uvec3 cellCoord) {
+    uvec3 cell = uvec3(cellCoord);
+
+    uint h =
+        cell.x * 73856093u ^
+        cell.y * 19349663u ^
+        cell.z * 83492791u;
+
+    // Avalanche finalizer
+    h ^= h >> 16;
+    h *= 0x7feb352du;
+    h ^= h >> 15;
+    h *= 0x846ca68bu;
+    h ^= h >> 16;
+
+    return h;
+}
+
+uint cellHashToKey(uint cellHash) {
+    // numParticles must be a power of two
+    return cellHash & uint(numParticles - 1);
+}
+
+uint cellCoordToKey(uvec3 cellCoord) {
+    return cellHashToKey(cellCoordToHash(cellCoord));
+}
+
+uint samplePointToKey(vec3 point) {
+    if (any(lessThan(point, minXYZ)) || any(greaterThan(point, maxXYZ))) return -1;
+    ivec3 cellCoord = ivec3(floor((point - minXYZ) / smoothingRadius));
+    return cellCoordToKey(cellCoord);
+}
+
+Hit createEmptyHit() {
+    return Hit(
+        HIT_MISS,
+        -1, -1, -1, // t, tNear, and tFar
+        vec3(0)
+    );
+}
+
+Hit intersectVolume(Ray ray) {
+    // simple aabb intersection
+    vec3 invDir = 1.0 / ray.dir;
+    vec3 t1 = (minXYZ - ray.origin) * invDir;
+    vec3 t2 = (maxXYZ - ray.origin) * invDir;
+
+    // find near and far t values
+    float tNear = max(max(min(t1.x, t2.x), min(t1.y, t2.y)), min(t1.z, t2.z));
+    float tFar = min(min(max(t1.x, t2.x), max(t1.y, t2.y)), max(t1.z, t2.z));
+
+    // check for intersection
+    if (tNear <= tFar && tFar >= 0) {
+        // Return distance 'tNear' (if ray is outside) or 'tFar' (if inside)
+        float t = tNear < 0 ? tFar : tNear;
+        vec3 hitPoint = ray.origin + t * ray.dir;
+
+        return Hit(HIT_SUCCESS, t, max(tNear + 1e-4, 0), tFar - 1e-4, hitPoint);
+    }
+
+    Hit noHit = createEmptyHit();
+    noHit.didHit = HIT_MISS;
+
+    return noHit; // no intersection
+}
+
+float smoothingKernel(float dist) {
+    if (dist >= smoothingRadius) return 0;
+    return (smoothingRadius - dist) * (smoothingRadius - dist);
+}
+
+ivec3 samplePointToCellCoord(vec3 point) {
+    if (any(lessThan(point, minXYZ)) || any(greaterThan(point, maxXYZ))) return ivec3(-1);
+    ivec3 cellCoord = ivec3(floor((point - minXYZ) / smoothingRadius));
+    return cellCoord;
+}
+
+vec3 calculateClosestFaceNormal(vec3 boxSize, vec3 p) {
+    vec3 center = 0.5 * (minXYZ + maxXYZ);
+    vec3 local = p - center;
+
+    vec3 halfSize = 0.5 * boxSize;
+    vec3 d = halfSize - abs(local);
+
+    if (d.x < d.y && d.x < d.z) return vec3(sign(local.x), 0.0, 0.0);
+    else if (d.y < d.z) return vec3(0.0, sign(local.y), 0.0);
+    else return vec3(0.0, 0.0, sign(local.z));
+}
+
+float calculateDensityAlongRay(Ray ray, float samplingStepSize) {
+    Hit hitData = intersectVolume(ray);
+    if (hitData.didHit == HIT_MISS) return 0;
+    float densityAlongRay = 0;
+    vec3 volumeSize = maxXYZ - minXYZ;
+    for (float t = max(hitData.tNear, 0) + samplingStepSize; t < hitData.tFar - samplingStepSize; t += samplingStepSize) {
+        vec3 samplePoint = ray.origin + t * ray.dir;
+        vec3 uvw = (samplePoint - minXYZ) / volumeSize;
+        float densityAlongStep = texture(densityMap, uvw).r;
+
+        densityAlongRay += densityAlongStep * samplingStepSize;
+    }
+
+    return densityAlongRay;
+}
+
+// essentially return "gradient of the scalar field"
+// this is all copied from sebastian lague, so... things might not work
+vec3 getSurfaceNormal(vec3 pos) {
+    vec3 volumeSize = maxXYZ - minXYZ;
+    vec3 uvw = (pos - minXYZ) / volumeSize;
+    uvw = clamp(uvw, 0, 1);
+    
+    ivec3 densityImageSize = imageSize(densityMapImage);
+    vec3 texel = 1 / vec3(densityImageSize);
+
+    float dx =
+        texture(densityMap, uvw + vec3(texel.x,0,0)).r -
+        texture(densityMap, uvw - vec3(texel.x,0,0)).r;
+
+    float dy =
+        texture(densityMap, uvw + vec3(0,texel.y,0)).r -
+        texture(densityMap, uvw - vec3(0,texel.y,0)).r;
+
+    float dz =
+        texture(densityMap, uvw + vec3(0,0,texel.z)).r -
+        texture(densityMap, uvw - vec3(0,0,texel.z)).r;
+
+    vec3 volumeNormal = normalize(vec3(dx, dy, dz));
+
+    // Smoothly flatten normals out at boundary edges
+    vec3 o = volumeSize / 2 - abs(pos);
+    float faceWeight = min(o.x, min(o.y, o.z));
+    vec3 faceNormal = calculateClosestFaceNormal(volumeSize, pos);
+    float smoothDst = 0.3;
+    float smoothPow = 5;
+    faceWeight = (1 - smoothstep(0, smoothDst, faceWeight)) * (1 - pow(clamp(volumeNormal.y, 0, 1), smoothPow));
+
+    return normalize(volumeNormal * (1 - faceWeight) + faceNormal * (faceWeight));
+}
+
+struct SurfaceInfo {
+    vec3 pos;
+    vec3 normal;
+    float densityAlongRay;
+    bool foundSurface;
+    bool entering;
+};
+
+bool isInFluid(vec3 pos) {
+    return all(greaterThanEqual(pos, minXYZ)) && all(lessThanEqual(pos, maxXYZ));
+}
+
+SurfaceInfo findNextSurface(Ray ray, bool insideFluid) {
+    // for now, just do fluid as surface. later, when triangles are added, add those as well
+    // if (insideFluid) return SurfaceInfo(vec3(0), vec3(0), 0, false, false);
+    Hit hit = intersectVolume(ray);
+    if (hit.didHit == HIT_MISS) return SurfaceInfo(vec3(0), vec3(0), 0, false, false);
+
+    bool outOfFluid = !isInFluid(ray.origin);
+    float t = insideFluid ? 0.0 : max(hit.tNear, 0.0);
+    ray.origin += (t + stepSize) * ray.dir;
+
+    vec3 prevPos = ray.origin;
+    vec3 volumeSize = maxXYZ - minXYZ;
+    float prevDensity = outOfFluid ? 0 : texture(densityMap, (ray.origin - minXYZ) / volumeSize).r;
+    float densityAlongRay = 0;
+
+    int iters = 0;
+
+    for (float t = t; t < hit.tFar; t += stepSize) {
+        ray.origin += stepSize * ray.dir;
+        iters++;
+        // if (iters > 2) break;
+
+        vec3 uvw = (ray.origin - minXYZ) / volumeSize;
+        float density = texture(densityMap, uvw).r;
+
+        densityAlongRay += density * stepSize;
+
+        bool entering = (prevDensity < surfaceDensityThreshold && density >= surfaceDensityThreshold);
+        bool exitting = (prevDensity >= surfaceDensityThreshold && density < surfaceDensityThreshold);
+        bool crossed = insideFluid ? (exitting) : entering;
+
+        if (crossed) {
+            vec3 normal = getSurfaceNormal(ray.origin);
+            if (dot(normal, ray.dir) > 0) normal = -normal; // for outward refraction
+            
+            float delta = density - prevDensity;
+            vec3 hitPos = ray.origin;
+            if (abs(delta) > 1e-6) {
+                // float alpha = (surfaceDensityThreshold-prevDensity) / (density-prevDensity);
+                // hitPos = prevPos + alpha * (ray.origin - prevPos);
+            }
+
+            return SurfaceInfo(hitPos, normal, densityAlongRay, true, entering);
+        }
+
+        prevDensity = density;
+        prevPos = ray.origin;
+    }
+
+    return SurfaceInfo(ray.origin, vec3(0), densityAlongRay, false, false);
+}
+
+// Calculate the proportion of light that is reflected at the boundary between two media (via the fresnel equations)
+// Note: the amount of light refracted can be calculated as 1 minus this value
+float calculateReflectance(vec3 inDir, vec3 normal, float iorA, float iorB) {
+    float refractRatio = iorA / iorB;
+    float cosAngleIn = -dot(inDir, normal);
+    float sinSqrAngleOfRefraction = refractRatio * refractRatio * (1 - cosAngleIn * cosAngleIn);
+    if (sinSqrAngleOfRefraction >= 1) return 1; // Ray is fully reflected, no refraction occurs
+
+    float cosAngleOfRefraction = sqrt(1 - sinSqrAngleOfRefraction);
+    // Perpendicular polarization
+    float rPerpendicular = (iorA * cosAngleIn - iorB * cosAngleOfRefraction) / (iorA * cosAngleIn + iorB * cosAngleOfRefraction);
+    rPerpendicular *= rPerpendicular;
+    // Parallel polarization
+    float rParallel = (iorB * cosAngleIn - iorA * cosAngleOfRefraction) / (iorB * cosAngleIn + iorA * cosAngleOfRefraction);
+    rParallel *= rParallel;
+
+    // Return the average of the perpendicular and parallel polarizations
+    return (rPerpendicular + rParallel) / 2;
+}
+
+struct LightResponse {
+    vec3 reflectDir;
+    vec3 refractDir;
+    float reflectWeight;
+    float refractWeight;
+};
+
+LightResponse calculateReflectionAndRefraction(vec3 inDir, vec3 normal, float iorA, float iorB) {
+    LightResponse result;
+
+    inDir = normalize(inDir);
+    normal = normalize(normal);
+
+    result.reflectWeight = calculateReflectance(inDir, normal, iorA, iorB);
+    result.refractWeight = 1 - result.reflectWeight;
+
+    result.reflectDir = normalize(reflect(inDir, normal));
+    
+    // protection against nan's
+    vec3 refr = refract(inDir, normal, iorA / iorB);
+    if (dot(refr, refr) > 1e-12) result.refractDir = normalize(refr);
+    else result.refractDir = vec3(0);
+
+    return result;
+}
+
+// gathers light data from outside the fluid
+
+// Floor
+float FLOOR_Z = 0;
+
+float hash21(vec2 p) {
+    p = fract(p * vec2(234.34, 435.345));
+    p += dot(p, p + 34.23);
+    return fract(p.x * p.y);
+}
+
+vec3 hsv2rgb(vec3 c) {
+    vec3 rgb = clamp(abs(mod(c.x * 6.0 + vec3(0,4,2),6.0)-3.0)-1.0,0.0,1.0);
+    rgb = rgb*rgb*(3.0-2.0*rgb);
+    return c.z * mix(vec3(1.0), rgb, c.y);
+}
+
+vec3 rgb2hsv(vec3 c) {
+    vec4 K = vec4(0.0,-1.0/3.0,2.0/3.0,-1.0);
+    vec4 p = mix(vec4(c.bg,K.wz), vec4(c.gb,K.xy), step(c.b,c.g));
+    vec4 q = mix(vec4(p.xyw,c.r), vec4(c.r,p.yzx), step(p.x,c.r));
+
+    float d = q.x - min(q.w,q.y);
+    float e = 1e-10;
+
+    return vec3(
+        abs(q.z + (q.w-q.y)/(6.0*d+e)),
+        d/(q.x+e),
+        q.x
+    );
+}
+
+vec3 shiftHue(vec3 rgb, float amount) {
+    vec3 hsv = rgb2hsv(rgb);
+    hsv.x = fract(hsv.x + amount);
+    return hsv2rgb(hsv);
+}
+
+// Checkerboard
+const vec2  CHECKER_CENTER = vec2(0.0, 0.0);
+const vec2  CHECKER_SIZE   = vec2(200.0, 200.0);   // total width/height
+const float TILE_SIZE      = 5.0;                // size of each checker square
+
+// Colors
+const vec3 FLOOR_COLOR = vec3(0.45);
+const vec3 CHECKER_B = vec3(0.35);
+
+const vec3 QUAD_POS_POS = vec3(0.95, 0.75, 0.75); // warm pink
+const vec3 QUAD_NEG_POS = vec3(0.75, 0.95, 0.75); // mint green
+const vec3 QUAD_NEG_NEG = vec3(0.75, 0.82, 0.98); // light blue
+const vec3 QUAD_POS_NEG = vec3(0.98, 0.95, 0.72); // soft yellow
+
+// Hue variation
+const float HUE_VARIATION = 0.04;
+
+vec3 environmentLight(Ray ray) {
+    //---------------------------------------
+    // Ground plane
+    //---------------------------------------
+    if (ray.dir.z < -1e-5) {
+        FLOOR_Z = minXYZ.z;
+        float t = (FLOOR_Z - ray.origin.z) / ray.dir.z;
+        if (t > 0.0) {
+            vec3 hit = ray.origin + t * ray.dir;
+            vec2 p = hit.xy - CHECKER_CENTER;
+            vec2 halfSize = CHECKER_SIZE * 0.5;
+
+            // Shoot a shadow ray toward the sun
+            Ray shadowRay = Ray(hit + dirToSun * 1e-3, dirToSun);
+            // If your dirToSun points FROM the sun instead of TO the sun,
+            // use -dirToSun instead.
+
+            // this might be bad... try increasing to 10
+            float opticalDepth = calculateDensityAlongRay(shadowRay, lightMarchStepSize);
+            vec3 shadow = exp(-opticalDepth * extinctionCoefficients);
+
+            // Inside checkerboard?
+            if (abs(p.x) <= halfSize.x && abs(p.y) <= halfSize.y) {
+                vec2 cell = floor((p + halfSize) / TILE_SIZE);
+                bool white = mod(cell.x + cell.y, 2.0) < 1.0;
+
+                vec3 lightColor;
+
+                if (p.x >= 0.0) {
+                    if (p.y >= 0.0) lightColor = QUAD_POS_POS;
+                    else lightColor = QUAD_POS_NEG;
+                }
+                else {
+                    if (p.y >= 0.0) lightColor = QUAD_NEG_POS;
+                    else lightColor = QUAD_NEG_NEG;
+                }
+
+                vec3 color = white ? lightColor : CHECKER_B;
+
+                // Stable random hue per tile
+                float h = hash21(cell);
+                color = shiftHue(color, (h - 0.5) * HUE_VARIATION);
+                return color * shadow;
+            }
+            // Rest of floor
+            return FLOOR_COLOR * shadow;
+        }
+    }
+
+    //---------------------------------------
+    // Sky
+    //---------------------------------------
+    float t = clamp(ray.dir.z * 0.5 + 0.5, 0.0, 1.0);
+
+    vec3 horizon = vec3(1);
+    vec3 zenith = vec3(0.50, 0.75, 1.00);
+
+    vec3 sky = mix(horizon, zenith, pow(t, 2.0));
+
+    float glow = exp(-25.0 * ray.dir.z * ray.dir.z);
+
+    return sky + glow * vec3(0.3);
+}
+
+bool getPlaneIntersection(Ray ray, out vec3 pos) {
+    if (abs(ray.dir.z) < 0.0001) {
+        return false; // No intersection / parallel
+    }
+    
+    float t = -ray.origin.z / ray.dir.z;
+    
+    // If t < 0, the intersection is behind the ray origin
+    if (t < 0.0) {
+        return false;
+    }
+    
+    // Return the 3D intersection point
+    pos = ray.origin + ray.dir * t;
+    return true;
+}
+
+vec3 marchRayExpensive(Ray ray) {
+    vec3 transmittance = vec3(1);
+    vec3 light = vec3(0);
+    float sampleStepSize = lightMarchStepSize;
+
+    bool inFluid = false;
+    bool earlyReturn = false;
+    int returnIter = -1;
+
+    bool skippedAllFluid = false;
+
+    for (int i = 0; i < numRefractions; i++) {
+        if (any(isnan(ray.dir))) return vec3(1,0,1);
+        if (length(ray.dir) < 1e-6) return vec3(1,1,0);
+
+        SurfaceInfo surface = findNextSurface(ray, inFluid);
+        transmittance *= exp(-surface.densityAlongRay * extinctionCoefficients);
+        if (!surface.foundSurface) {
+            if (i == 0) skippedAllFluid = true;
+            break;
+        }
+
+        vec3 normal = surface.normal;
+        float iorA = surface.entering ? 1 : indexOfRefraction;
+        float iorB = surface.entering ? indexOfRefraction : 1;
+
+        // if (normal == vec3(0)) return vec3(1,0,1);
+        LightResponse r = calculateReflectionAndRefraction(ray.dir, normal, iorA, iorB);
+
+        bool followRefract = r.refractWeight > r.reflectWeight; // try this out
+
+        Ray refractRay = Ray(surface.pos - normal * 1e-3, r.refractDir);
+        Ray reflectRay = Ray(surface.pos + normal * 1e-3, r.reflectDir);
+
+        bool didRefract = followRefract && length(r.refractDir) > 1e-6;
+
+        if (didRefract) inFluid = !inFluid;
+
+        followRefract = didRefract;
+
+        // approximate light for less interesting path
+        if (!followRefract) {
+            // approximate refraction
+            if (r.refractWeight > 0) {
+                float densityRefract = calculateDensityAlongRay(refractRay, sampleStepSize);
+                light += environmentLight(refractRay) * transmittance * exp(-densityRefract * extinctionCoefficients) * r.refractWeight;
+            }
+            else {
+                // total internal refraction?
+            }
+        }
+        else {
+            // approximate reflection
+            float densityReflect = calculateDensityAlongRay(reflectRay, sampleStepSize);
+            light += environmentLight(reflectRay) * transmittance * exp(-densityReflect * extinctionCoefficients) * r.reflectWeight;
+        }
+
+        // set up ray to follow more interesting path in the next iteration
+        ray = followRefract ? refractRay : reflectRay;
+        transmittance *= followRefract ? r.refractWeight : r.reflectWeight;
+
+        if (max(transmittance.r, max(transmittance.g, transmittance.b)) < 0.02) break;
+    }
+
+    // approximate incoming light once max number of reflections/refrations has been reached
+    light += environmentLight(ray) * transmittance * exp(-calculateDensityAlongRay(ray, sampleStepSize) * extinctionCoefficients);
+
+    return light;
+}
+
+Ray makeRayFromCameraThroughPixel() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    float px = x + 0.5;
+    float py = y + 0.5;
+
+    float u = (px / float(width)) * 2 - 1;
+    float v = (py / float(height)) * 2 - 1;
+
+    float planeHalfHeight = tan(0.5f * FOV);
+    float planeHalfWidth = planeHalfHeight * width / float(height);
+
+    vec3 viewPlaneCenter = camera.position + camera.forward;
+    vec3 pixelPoint = viewPlaneCenter + u * planeHalfWidth * camera.right;
+    // NOTE: this means y=0 is top of screen!!!
+    pixelPoint = pixelPoint - v * planeHalfHeight * camera.up;
+
+    return Ray(
+        camera.position,
+        normalize(pixelPoint - camera.position)
+    );
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= width || coord.y >= height) return;
+    Ray ray = makeRayFromCameraThroughPixel();
+    vec3 color = marchRayExpensive(ray);
+
+    // vec3 color = environmentLight(ray);
+
+    imageStore(outputImage, coord, vec4(color, 1));
+}

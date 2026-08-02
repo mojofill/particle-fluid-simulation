@@ -160,6 +160,12 @@ void multiRadixSort(vk_context  *vko, VkCommandBuffer commandBuffer) {
     }
 }
 
+void dispatchComputeShader(VkCommandBuffer commandBuffer, VkPipeline computePipeline, VkPipelineLayout computePipelineLayout, VkDescriptorSet *pDescriptorSet, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) {
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, pDescriptorSet, 0, NULL);
+    vkCmdDispatch(commandBuffer, groupCountX, groupCountY, groupCountZ);
+}
+
 void recordCommands(vk_context *vko, uint32_t currentFrame, int imageIndex) {
     int i = imageIndex;
 
@@ -400,18 +406,101 @@ void recordCommands(vk_context *vko, uint32_t currentFrame, int imageIndex) {
         vko->positionsBuffers[vko->ping],
         vko->commandBuffers[i], 
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
-        VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
         VK_ACCESS_SHADER_WRITE_BIT, 
-        VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT
+        VK_ACCESS_SHADER_READ_BIT
     );
 
-    // render pass = the "plan" that says what it will do after it gets the image data. its currently working with a color attachment as a placeholder. needs pipeline to actually supply the data to the color attachment
     TS_BEGIN(QUERY_RENDER);
+
+    if (vko->renderType == RAYMARCH_VOLUMETRIC || vko->renderType == RAYMARCH_FLUID) {
+        // update density map
+        dispatchComputeShader(
+            vko->commandBuffers[i],
+            vko->updateDensityMapComputePipeline,
+            vko->updateDensityMapComputePipelineLayout,
+            &vko->descriptorSets[vko->ping],
+            (vko->raymarchCellSize[0] + 7) / 8, (vko->raymarchCellSize[1] + 7) / 8, (vko->raymarchCellSize[2] + 7) / 8
+        );
+
+        createImageMemoryBarrier(
+            vko,
+            vko->densityMap,
+            vko->commandBuffers[i],
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT
+        );
+
+        // volumetric rendering
+        if (vko->renderType == RAYMARCH_VOLUMETRIC) {
+            // calculate light volume
+            dispatchComputeShader(
+                vko->commandBuffers[i],
+                vko->calculateLightVolumeComputePipeline,
+                vko->calculateLightVolumeComputePipelineLayout,
+                &vko->descriptorSets[vko->ping],
+                (vko->lightVolumeSize[0] + 7) / 8, (vko->lightVolumeSize[1] + 7) / 8, (vko->lightVolumeSize[2] + 7) / 8
+            );
+
+            createImageMemoryBarrier(
+                vko,
+                vko->lightVolume,
+                vko->commandBuffers[i],
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT
+            );
+
+            // raymarch particles as a volume (like an atmosphere or cloud)
+            dispatchComputeShader(
+                vko->commandBuffers[i],
+                vko->volumetricFluidComputePipeline,
+                vko->volumetricFluidComputePipelineLayout,
+                &vko->descriptorSets[vko->ping],
+                (vko->width + 15) / 16, (vko->height + 15) / 16, 1
+            );
+        }
+        // proper fluid rendering (reflection and refractions)
+        else if (vko->renderType == RAYMARCH_FLUID) {
+            dispatchComputeShader(
+                vko->commandBuffers[i],
+                vko->properFluidComputePipeline,
+                vko->properFluidComputePipelineLayout,
+                &vko->descriptorSets[vko->ping],
+                (vko->width + 15) / 16, (vko->height + 15) / 16, 1
+            );
+        }
+
+        createImageMemoryBarrier(
+            vko,
+            vko->storageImage,
+            vko->commandBuffers[i],
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT
+        );
+    }
+
+    // render pass = the "plan" that says what it will do after it gets the image data. its currently working with a color attachment as a placeholder. needs pipeline to actually supply the data to the color attachment
     vkCmdBeginRenderPass(vko->commandBuffers[i], &renderPassInfoCmd, VK_SUBPASS_CONTENTS_INLINE);
 
     // here is graphipcs pipeline work
-    vkCmdBindPipeline(vko->commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, vko->graphicsPipeline);
-    vkCmdBindDescriptorSets(vko->commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, vko->graphicsPipelineLayout, 0, 1, &vko->descriptorSets[vko->ping], 0, NULL);
+    VkPipeline graphicsPipeline;
+    VkPipelineLayout graphicsPipelineLayout;
+    if (vko->renderType == RASTERIZATION) {
+        graphicsPipeline = vko->rasterizeGraphicsPipeline;
+        graphicsPipelineLayout = vko->rasterizeGraphicsPipelineLayout;
+    }
+    else if (vko->renderType == RAYMARCH_VOLUMETRIC || vko->renderType == RAYMARCH_FLUID) {
+        graphicsPipeline = vko->raymarchGraphicsPipeline;
+        graphicsPipelineLayout = vko->raymarchGraphicsPipelineLayout;
+    }
+    vkCmdBindPipeline(vko->commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+    vkCmdBindDescriptorSets(vko->commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &vko->descriptorSets[vko->ping], 0, NULL);
 
     // specified viewport + scissor to be dynamic => must explicity set them here
     vko->viewport = (VkViewport) {0};
@@ -429,10 +518,16 @@ void recordCommands(vk_context *vko, uint32_t currentFrame, int imageIndex) {
     vko->scissor.extent = vko->surfaceCapabilities.currentExtent;
     vkCmdSetScissor(vko->commandBuffers[i], 0, 1, &vko->scissor);
 
-    VkBuffer buffers[2] = { vko->sphereMeshBuffer, vko->positionsBuffers[vko->ping] };
+    if (vko->renderType == RASTERIZATION) {
+        VkBuffer buffers[2] = { vko->sphereMeshBuffer, vko->positionsBuffers[vko->ping] };
 
-    vkCmdBindVertexBuffers(vko->commandBuffers[i], 0, 2, buffers, (VkDeviceSize[2]) {0, 0});
-    vkCmdDraw(vko->commandBuffers[i], vko->sphereVertexCount, vko->numParticles, 0, 0);
+        vkCmdBindVertexBuffers(vko->commandBuffers[i], 0, 2, buffers, (VkDeviceSize[2]) {0, 0});
+        vkCmdDraw(vko->commandBuffers[i], vko->sphereVertexCount, vko->numParticles, 0, 0);
+    }
+    else if (vko->renderType == RAYMARCH_VOLUMETRIC || vko->renderType == RAYMARCH_FLUID) {
+        vkCmdBindVertexBuffers(vko->commandBuffers[i], 0, 1, &vko->fullScreenQuadVertexBuffer, (VkDeviceSize[]) {0});
+        vkCmdDraw(vko->commandBuffers[i], 6, 1, 0, 0);
+    }
     
     vkCmdEndRenderPass(vko->commandBuffers[i]);
     TS_END(QUERY_RENDER);

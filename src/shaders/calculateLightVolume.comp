@@ -1,0 +1,219 @@
+#version 450
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+struct CellEntry {
+    uint key;
+    uint particleIndex;
+};
+layout (binding = 1, rgba32f) uniform writeonly image2D outputImage;
+layout (std430, binding = 2)  buffer PositionsBuffer           { vec4 positions[]; };
+layout (std430, binding = 3)  buffer VelocitiesBuffer          { vec4 velocities[]; };
+layout (std430, binding = 4)  buffer PredictedPositionsBuffer  { vec4 predictedPositions[]; };
+layout (std430, binding = 5)  buffer PredictedVelocitiesBuffer { vec4 predictedVelocities[]; };
+layout (std430, binding = 6)  buffer CellEntriesBuffer         { CellEntry cellEntries[]; };
+layout (std430, binding = 7)  buffer DensitiesBuffer           { float densities[]; };
+layout (std430, binding = 8)  buffer StartIndices              { int startIndices[]; };
+layout (std430, binding = 9)  buffer ColorBuffer               { vec4 colors[]; };
+// ... buffers in between are for ping pong, which arent needed in this shader
+layout (std430, binding = 18) buffer EndIndicesBuffer          { int endIndices[]; };
+
+layout (std430, binding = 19) buffer NearDensitiesBuffer             { float nearDensities[]; };
+layout (std430, binding = 20) buffer NearDensitiesOutputBuffer       { float nearDensitiesOutput[]; };
+layout (binding = 22) uniform sampler3D densityMap;
+layout (binding = 23, r32f) uniform writeonly image3D lightVolume;
+
+struct Camera {
+    vec3 position;
+    float padA;
+    vec3 forward;
+    float padB;
+    vec3 right;
+    float padC;
+    vec3 up;
+    float padD;
+
+    // these will only be used on cpu side to compute camera
+    float yaw;
+    float pitch;
+    float lastX;
+    float lastY;
+};
+
+layout(binding = 0) uniform UniformBufferObject {
+    mat4 model;
+    mat4 view;
+    mat4 proj;
+    int numParticles;
+    float particleRadius;
+    float smoothingRadius;
+    float g;
+    vec3 minXYZ;
+    float dt;
+    vec3 maxXYZ;
+    float pad0;
+    float particleMass;
+    float pressureMultiplier;
+    float targetDensity;
+    float visocosityStrength;
+    float volume;
+    float nearPressureMultiplier;
+    int width;
+    int height;
+    float stepSize;
+    int frameCount;
+    float padA;
+    float padB;
+    Camera camera;
+    int renderType;
+    float densityCellSize;
+    float padC;
+    float padD;
+    vec3 extinctionCoefficients;
+    float padE;
+    vec3 dirToSun;
+    float lightMarchStepSize;
+    float FOV;
+};
+
+struct Ray {
+    vec3 origin;
+    vec3 dir;
+};
+
+struct Hit {
+    int didHit;
+    float t;
+    float tNear;
+    float tFar;
+    vec3 position;
+};
+
+// const vec3 skyColor = vec3(0.529, 0.808, 0.922);
+const vec3 skyColor = vec3(0);
+
+#define HIT_MISS 0
+#define HIT_SUCCESS 1
+
+uint state = uint(frameCount * 100);
+
+uint pcg() {
+    uint state_old = state;
+    // LCG step
+    state = state_old * 747796405u + 2891336453u;
+    // Xor shift step
+    uint word = ((state_old >> ((state_old >> 28u) + 4u)) ^ state_old) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// --- Float Conversion ---
+// Returns a pseudo-random float in the range [0.0, 1.0)
+float randf() {
+    // Convert 32-bit int to a float between 0.0 and 1.0
+    return float(pcg()) / 4294967296.0;
+}
+
+uint cellCoordToHash(uvec3 cellCoord) {
+    uvec3 cell = uvec3(cellCoord);
+
+    uint h =
+        cell.x * 73856093u ^
+        cell.y * 19349663u ^
+        cell.z * 83492791u;
+
+    // Avalanche finalizer
+    h ^= h >> 16;
+    h *= 0x7feb352du;
+    h ^= h >> 15;
+    h *= 0x846ca68bu;
+    h ^= h >> 16;
+
+    return h;
+}
+
+uint cellHashToKey(uint cellHash) {
+    // numParticles must be a power of two
+    return cellHash & uint(numParticles - 1);
+}
+
+uint cellCoordToKey(uvec3 cellCoord) {
+    return cellHashToKey(cellCoordToHash(cellCoord));
+}
+
+uint samplePointToKey(vec3 point) {
+    if (any(lessThan(point, minXYZ)) || any(greaterThan(point, maxXYZ))) return -1;
+    ivec3 cellCoord = ivec3(floor((point - minXYZ) / smoothingRadius));
+    return cellCoordToKey(cellCoord);
+}
+
+Hit createEmptyHit() {
+    return Hit(
+        HIT_MISS,
+        -1, -1, -1, // t, tNear, and tFar
+        vec3(0)
+    );
+}
+
+Hit intersectVolume(Ray ray) {
+    // simple aabb intersection
+    vec3 invDir = 1.0 / ray.dir;
+    vec3 t1 = (minXYZ - ray.origin) * invDir;
+    vec3 t2 = (maxXYZ - ray.origin) * invDir;
+
+    // find near and far t values
+    float tNear = max(max(min(t1.x, t2.x), min(t1.y, t2.y)), min(t1.z, t2.z));
+    float tFar = min(min(max(t1.x, t2.x), max(t1.y, t2.y)), max(t1.z, t2.z));
+
+    // check for intersection
+    if (tNear <= tFar && tFar >= 0) {
+        // Return distance 'tNear' (if ray is outside) or 'tFar' (if inside)
+        float t = tNear < 0 ? tFar : tNear;
+        vec3 hitPoint = ray.origin + t * ray.dir;
+
+        return Hit(HIT_SUCCESS, t, max(tNear - 1, 0), tFar + 1, hitPoint);
+    }
+
+    Hit noHit = createEmptyHit();
+    noHit.didHit = HIT_MISS;
+
+    return noHit; // no intersection
+}
+
+float smoothingKernel(float dist) {
+    if (dist >= smoothingRadius) return 0;
+    return (smoothingRadius - dist) * (smoothingRadius - dist);
+}
+
+ivec3 samplePointToCellCoord(vec3 point) {
+    if (any(lessThan(point, minXYZ)) || any(greaterThan(point, maxXYZ))) return ivec3(-1);
+    ivec3 cellCoord = ivec3(floor((point - minXYZ) / smoothingRadius));
+    return cellCoord;
+}
+
+float calculateDensityAlongSunRay(vec3 samplePoint) {
+    Hit hitData = intersectVolume(Ray(samplePoint, dirToSun));
+    if (hitData.didHit == HIT_MISS) return 0; // this really shouldnt happen, but adding it anyways just in case
+    
+    float densityAlongSunRay = 0;
+    vec3 volumeSize = maxXYZ - minXYZ;
+
+    for (float t = max(hitData.tNear, 0); t < hitData.tFar; t += lightMarchStepSize) {
+        vec3 pos = samplePoint + t * dirToSun;
+        vec3 uvw = (pos - minXYZ) / volumeSize;
+        float densityAlongStep = texture(densityMap, uvw).r;
+        densityAlongSunRay += densityAlongStep * lightMarchStepSize;
+    }
+
+    return densityAlongSunRay;
+}
+
+void main() {
+    ivec3 lightVoxelCoord = ivec3(gl_GlobalInvocationID.xyz);
+    vec3 dimensions = maxXYZ - minXYZ;
+    if (any(greaterThan(lightVoxelCoord, dimensions))) return;
+
+    vec3 voxelCenter = minXYZ + (vec3(lightVoxelCoord) + 0.5) * lightMarchStepSize;
+    float density = calculateDensityAlongSunRay(voxelCenter);
+
+    imageStore(lightVolume, lightVoxelCoord, vec4(density));
+}

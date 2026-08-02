@@ -19,7 +19,8 @@ void createPipeline(
     int depthTestEnable,
     int depthWriteEnable,
     VkCullModeFlagBits cullMode,
-    VkPipeline *destPipeline
+    VkPipeline *destPipeline,
+    VkPipelineLayout *destPipelineLayout
 );
 void createGraphicsPipeline(vk_context *vko);
 VkShaderModule load_shader(VkDevice device, const char* path);

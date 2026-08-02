@@ -1,7 +1,7 @@
 #include "renderer.h"
 #include <stdlib.h>
 
-// #define DEBUG
+#define DEBUG
 
 static void initWindow(vk_context *vko) {
     if (!glfwInit()) {
@@ -502,8 +502,7 @@ void initializeEndIndicesBuffer(vk_context *vko) {
 
 void initializePositionsBuffer(vk_context *vko) {
     vec4 *positions = malloc(vko->numParticles * sizeof(vec4));
-    int dropletNumber = 0;
-    for (int i = 0; i < vko->numParticles - dropletNumber; i++) {
+    for (int i = 0; i < vko->numParticles; i++) {
         // use a bounding box
         float scale_x = 0.45;
         float scale_y = 0.45;
@@ -515,16 +514,14 @@ void initializePositionsBuffer(vk_context *vko) {
             0
         };
 
-        glm_vec4_copy(pos, positions[i]);
-    }
+        float s = 0;
 
-    for (int i = vko->numParticles - dropletNumber; i < vko->numParticles; i++) {
-        vec4 pos = {
-            randf() * ((vko->maxXYZ[0] - vko->minXYZ[0]) - 2 * vko->particleRadius) * 0.2 - 0.1 * (vko->maxXYZ[0] - vko->minXYZ[0]),
-            randf() * ((vko->maxXYZ[1] - vko->minXYZ[1]) - 2 * vko->particleRadius) * 0.2 - 0.1 * (vko->maxXYZ[1] - vko->minXYZ[1]),
-            randf() * ((vko->maxXYZ[2] - vko->minXYZ[2]) - 2 * vko->particleRadius) * 0.2 + 0.3 * (vko->maxXYZ[2] - vko->minXYZ[2]),
-            0
-        };
+        if (randf() < 0.5) {
+            pos[0] -= s;
+        }
+        else {
+            pos[0] += s;
+        }
 
         glm_vec4_copy(pos, positions[i]);
     }
@@ -576,7 +573,7 @@ void initializeVelocitiesBuffer(vk_context *vko) {
         //     0
         // };
 
-        vec4 velocity = {60, 0, 0, 0};
+        vec4 velocity = {0, 0, -60, 0};
 
         glm_vec4_copy(velocity, velocities[i]);
     }
@@ -637,6 +634,23 @@ void initializeCellEntriesBuffer(vk_context *vko) {
     free(cellEntries);
 }
 
+void initializeNearDensitiesBuffer(vk_context *vko) {
+    float *nearDensities = malloc(vko->numParticles * sizeof(float));
+    for (int i = 0; i < vko->numParticles; i++) nearDensities[i] = 0;
+    for (int ping = 0; ping < 2; ping++) {
+        uploadDataToBufferViaStaging(
+            vko,
+            nearDensities,
+            vko->numParticles * sizeof(float),
+            &vko->nearDensitiesBuffers[ping],
+            &vko->nearDensitiesMemories[ping],
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            0
+        );
+    }
+    free(nearDensities);
+}
+
 void initializeDensitiesBuffer(vk_context *vko) {
     int *densities = malloc(vko->numParticles * sizeof(int));
     for (int i = 0; i < vko->numParticles; i++) densities[i] = 0;
@@ -673,6 +687,101 @@ void initializeStartIndicesBuffer(vk_context *vko) {
     free(startIndices);
 }
 
+void initializeStorageImage(vk_context *vko) {
+    createImage( // create storage image for a fullscreen quad
+        vko,
+        vko->width,
+        vko->height,
+        1,
+        VK_IMAGE_TYPE_2D,
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        &vko->storageImage,
+        &vko->storageImageMemory
+    );
+    createImageView(vko, vko->storageImage, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &vko->storageImageView);
+    createSampler(vko, &vko->storageSampler);
+}
+
+void initializeDensityMap(vk_context *vko) {
+    vec3 cellSize;
+    glm_vec3_sub(vko->maxXYZ, vko->minXYZ, cellSize);
+    glm_vec3_scale(cellSize, 1/(float) vko->densityCellSize, cellSize);
+
+    vko->raymarchCellSize[0] = (int) ceil(cellSize[0]);
+    vko->raymarchCellSize[1] = (int) ceil(cellSize[1]);
+    vko->raymarchCellSize[2] = (int) ceil(cellSize[2]);
+
+    createImage(
+        vko,
+        (uint32_t) vko->raymarchCellSize[0],
+        (uint32_t) vko->raymarchCellSize[1],
+        (uint32_t) vko->raymarchCellSize[2],
+        VK_IMAGE_TYPE_3D,
+        VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        &vko->densityMap,
+        &vko->densityMapMemory
+    );
+    createImageView(vko, vko->densityMap, VK_IMAGE_VIEW_TYPE_3D, VK_FORMAT_R32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &vko->densityMapImageView);
+    createSampler(vko, &vko->densityMapSampler);
+
+    transitionImageLayout(
+        vko,
+        vko->densityMap,
+        VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        VK_ACCESS_SHADER_WRITE_BIT
+    );
+}
+
+void initializeLightVolume(vk_context *vko) {
+    vec3 volumeSize;
+    glm_vec3_sub(vko->maxXYZ, vko->minXYZ, volumeSize);
+    glm_vec3_scale(volumeSize, 1/(float) vko->lightMarchStepSize, volumeSize);
+
+    vko->lightVolumeSize[0] = (int) ceil(volumeSize[0]);
+    vko->lightVolumeSize[1] = (int) ceil(volumeSize[1]);
+    vko->lightVolumeSize[2] = (int) ceil(volumeSize[2]);
+
+    createImage(
+        vko,
+        (uint32_t) vko->lightVolumeSize[0],
+        (uint32_t) vko->lightVolumeSize[1],
+        (uint32_t) vko->lightVolumeSize[2],
+        VK_IMAGE_TYPE_3D,
+        VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_TILING_OPTIMAL,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        &vko->lightVolume,
+        &vko->lightVolumeMemory
+    );
+
+    createImageView(vko, vko->lightVolume, VK_IMAGE_VIEW_TYPE_3D, VK_FORMAT_R32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &vko->lightVolumeImageView);
+    createSampler(vko, &vko->lightVolumeSampler);
+
+    transitionImageLayout(
+        vko,
+        vko->lightVolume,
+        VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        VK_ACCESS_SHADER_WRITE_BIT
+    );
+}
+
 static void initVulkan(vk_context *vko) {
     vko->framebufferResized = 0; // initialize framebuffer resizing flag to 0 (off)
     createInstance(vko);
@@ -685,18 +794,7 @@ static void initVulkan(vk_context *vko) {
     createQueryPool(vko);
     createCommandPool(vko);
     createUniformBuffer(vko);
-    createImage( // create storage image for a fullscreen quad
-        vko,
-        800,
-        800,
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_TILING_OPTIMAL,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        &vko->storageImage, &vko->storageImageMemory
-    );
-    createImageView(vko, vko->storageImage, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &vko->storageImageView);
-    createSampler(vko, &vko->storageSampler);
+    initializeStorageImage(vko);
     initializePositionsBuffer(vko);
     initializePredictedPositionsBuffer(vko);
     initializeVelocitiesBuffer(vko);
@@ -707,6 +805,9 @@ static void initVulkan(vk_context *vko) {
     initializeColorsBuffer(vko);
     initializeHistogramsBuffer(vko);
     initializeEndIndicesBuffer(vko);
+    initializeNearDensitiesBuffer(vko);
+    initializeDensityMap(vko);
+    initializeLightVolume(vko);
     vko->initializePositionsBuffer = initializePositionsBuffer;
     vko->initializePredictedPositionsBuffer = initializePredictedPositionsBuffer;
     vko->initializeVelocitiesBuffer = initializeVelocitiesBuffer;
@@ -717,6 +818,8 @@ static void initVulkan(vk_context *vko) {
     vko->initializeColorsBuffer = initializeColorsBuffer;
     vko->initializeHistogramsBuffer = initializeHistogramsBuffer;
     vko->initializeEndIndicesBuffer = initializeEndIndicesBuffer;
+    vko->initializeNearDensitiesBuffer = initializeNearDensitiesBuffer;
+    vko->initializeDensityMap = initializeDensityMap;
     createDescriptorSetLayout(vko);
     createDescriptorPool(vko);
     createDescriptorSets(vko);
@@ -802,6 +905,34 @@ static void initVulkan(vk_context *vko) {
         "./src/spvs/multiRadixSortHistograms.spv",
         sizeof(PushConstantsMultiRadixSortHistograms)
     );
+    createComputePipeline(
+        vko,
+        &vko->volumetricFluidComputePipelineLayout,
+        &vko->volumetricFluidComputePipeline,
+        "./src/spvs/volumetricFluid.spv",
+        sizeof(PushConstantsBitonicSort)
+    );
+    createComputePipeline(
+        vko,
+        &vko->updateDensityMapComputePipelineLayout,
+        &vko->updateDensityMapComputePipeline,
+        "./src/spvs/updateDensityMap.spv",
+        sizeof(PushConstantsBitonicSort)
+    );
+    createComputePipeline(
+        vko,
+        &vko->calculateLightVolumeComputePipelineLayout,
+        &vko->calculateLightVolumeComputePipeline,
+        "./src/spvs/calculateLightVolume.spv",
+        sizeof(PushConstantsBitonicSort)
+    );
+    createComputePipeline(
+        vko,
+        &vko->properFluidComputePipelineLayout,
+        &vko->properFluidComputePipeline,
+        "./src/spvs/properFluid.spv",
+        sizeof(PushConstantsBitonicSort)
+    );
     createFramebuffers(vko);
     createCommandBuffers(vko);
     createSyncObjects(vko);
@@ -815,7 +946,8 @@ void cleanupRenderer(vk_context *vko) {
     }
     vkDestroyCommandPool(vko->device, vko->commandPool, NULL);
     vkDestroyQueryPool(vko->device, vko->queryPool, NULL);
-    vkDestroyPipeline(vko->device, vko->graphicsPipeline, NULL);
+    vkDestroyPipeline(vko->device, vko->rasterizeGraphicsPipeline, NULL);
+    vkDestroyPipeline(vko->device, vko->raymarchGraphicsPipeline, NULL);
     vkDestroyPipeline(vko->device, vko->updateCellEntriesComputePipeline, NULL);
     vkDestroyPipeline(vko->device, vko->bitonicSortComputePipeline, NULL);
     vkDestroyPipeline(vko->device, vko->updateVelocitiesComputePipeline, NULL);
@@ -827,7 +959,12 @@ void cleanupRenderer(vk_context *vko) {
     vkDestroyPipeline(vko->device, vko->scatterPassComputePipeline, NULL);
     vkDestroyPipeline(vko->device, vko->multiRadixSortComputePipeline, NULL);
     vkDestroyPipeline(vko->device, vko->multiRadixSortHistogramsComputePipeline, NULL);
-    vkDestroyPipelineLayout(vko->device, vko->graphicsPipelineLayout, NULL);
+    vkDestroyPipeline(vko->device, vko->volumetricFluidComputePipeline, NULL);
+    vkDestroyPipeline(vko->device, vko->updateDensityMapComputePipeline, NULL);
+    vkDestroyPipeline(vko->device, vko->calculateLightVolumeComputePipeline, NULL);
+    vkDestroyPipeline(vko->device, vko->properFluidComputePipeline, NULL);
+    vkDestroyPipelineLayout(vko->device, vko->rasterizeGraphicsPipelineLayout, NULL);
+    vkDestroyPipelineLayout(vko->device, vko->raymarchGraphicsPipelineLayout, NULL);
     vkDestroyPipelineLayout(vko->device, vko->updateCellEntriesComputePipelineLayout, NULL);
     vkDestroyPipelineLayout(vko->device, vko->bitonicSortComputePipelineLayout, NULL);
     vkDestroyPipelineLayout(vko->device, vko->updateVelocitiesComputePipelineLayout, NULL);
@@ -839,6 +976,10 @@ void cleanupRenderer(vk_context *vko) {
     vkDestroyPipelineLayout(vko->device, vko->scatterPassComputePipelineLayout, NULL);
     vkDestroyPipelineLayout(vko->device, vko->multiRadixSortComputePipelineLayout, NULL);
     vkDestroyPipelineLayout(vko->device, vko->multiRadixSortHistogramsComputePipelineLayout, NULL);
+    vkDestroyPipelineLayout(vko->device, vko->volumetricFluidComputePipelineLayout, NULL);
+    vkDestroyPipelineLayout(vko->device, vko->updateDensityMapComputePipelineLayout, NULL);
+    vkDestroyPipelineLayout(vko->device, vko->calculateLightVolumeComputePipelineLayout, NULL);
+    vkDestroyPipelineLayout(vko->device, vko->properFluidComputePipelineLayout, NULL);
     vkDestroyRenderPass(vko->device, vko->renderPass, NULL);
     vkFreeMemory(vko->device, vko->fullScreenQuadVertexBufferMemory, NULL);
     vkDestroySampler(vko->device, vko->storageSampler, NULL);
@@ -847,6 +988,15 @@ void cleanupRenderer(vk_context *vko) {
     vkFreeMemory(vko->device, vko->depthImageMemory, NULL);
     vkDestroyImageView(vko->device, vko->storageImageView, NULL);
     vkDestroyImage(vko->device, vko->storageImage, NULL);
+    vkDestroyImage(vko->device, vko->densityMap, NULL);
+    vkDestroyImage(vko->device, vko->lightVolume, NULL);
+    vkDestroyImageView(vko->device, vko->densityMapImageView, NULL);
+    vkDestroyImageView(vko->device, vko->lightVolumeImageView, NULL);
+    vkDestroySampler(vko->device, vko->densityMapSampler, NULL);
+    vkDestroySampler(vko->device, vko->lightVolumeSampler, NULL);
+    vkFreeMemory(vko->device, vko->storageImageMemory, NULL);
+    vkFreeMemory(vko->device, vko->densityMapMemory, NULL);
+    vkFreeMemory(vko->device, vko->lightVolumeMemory, NULL);
     vkDestroyBuffer(vko->device, vko->sphereMeshBuffer, NULL);
     vkFreeMemory(vko->device, vko->sphereMeshMemory, NULL);
     for (int ping = 0; ping < 2; ping++) {
@@ -857,6 +1007,7 @@ void cleanupRenderer(vk_context *vko) {
         vkDestroyBuffer(vko->device, vko->densitiesBuffers[ping], NULL);
         vkDestroyBuffer(vko->device, vko->colorsBuffers[ping], NULL);
         vkDestroyBuffer(vko->device, vko->cellEntriesBuffers[ping], NULL);
+        vkDestroyBuffer(vko->device, vko->nearDensitiesBuffers[ping], NULL);
         vkFreeMemory(vko->device, vko->predictedPositionsMemories[ping], NULL);
         vkFreeMemory(vko->device, vko->predictedVelocitiesMemories[ping], NULL);
         vkFreeMemory(vko->device, vko->positionsMemories[ping], NULL);
@@ -864,6 +1015,7 @@ void cleanupRenderer(vk_context *vko) {
         vkFreeMemory(vko->device, vko->densitiesMemories[ping], NULL);
         vkFreeMemory(vko->device, vko->colorsMemories[ping], NULL);
         vkFreeMemory(vko->device, vko->cellEntriesMemories[ping], NULL);
+        vkFreeMemory(vko->device, vko->nearDensitiesMemories[ping], NULL);
     }
     vkDestroyBuffer(vko->device, vko->startIndicesBuffer, NULL);
     vkDestroyBuffer(vko->device, vko->histogramsBuffer, NULL);
@@ -871,7 +1023,6 @@ void cleanupRenderer(vk_context *vko) {
     vkFreeMemory(vko->device, vko->startIndicesMemory, NULL);
     vkFreeMemory(vko->device, vko->histogramsMemory, NULL);
     vkFreeMemory(vko->device, vko->endIndicesMemory, NULL);
-    vkFreeMemory(vko->device, vko->storageImageMemory, NULL);
     vkDestroyBuffer(vko->device, vko->uniformBuffer, NULL);
     vkFreeMemory(vko->device, vko->uniformBufferMemory, NULL);
     vkDestroyDescriptorPool(vko->device, vko->descriptorPool, NULL);

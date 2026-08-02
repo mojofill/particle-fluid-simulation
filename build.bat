@@ -16,6 +16,12 @@ glslc src\shaders\applyPressureAndViscosityForce.comp -o src\spvs\applyPressureA
 glslc src\shaders\scatterPass.comp -o src\spvs\scatterPass.spv
 glslc src\shaders\multiRadixSort.comp -o src\spvs\multiRadixSort.spv --target-env=vulkan1.1
 glslc src\shaders\multiRadixSortHistograms.comp -o src\spvs\multiRadixSortHistograms.spv --target-env=vulkan1.1
+glslc src\shaders\volumetricFluid.comp -o src\spvs\volumetricFluid.spv
+glslc src\shaders\raymarchShader.vert -o src\spvs\raymarchVert.spv
+glslc src\shaders\raymarchShader.frag -o src\spvs\raymarchFrag.spv
+glslc src\shaders\updateDensityMap.comp -o src\spvs\updateDensityMap.spv
+glslc src\shaders\calculateLightVolume.comp -o src\spvs\calculateLightVolume.spv
+glslc src\shaders\properFluid.comp -o src\spvs\properFluid.spv
 
 echo Configuring CMake...
 cmake -S . -B build ^

@@ -12,6 +12,14 @@
 
 #define MAX_FRAMES_IN_FLIGHT 2
 
+enum RenderTypes {
+    RASTERIZATION,
+    RAYMARCH_VOLUMETRIC,
+    RAYMARCH_FLUID,
+    // SCREENSPACE,
+    RENDER_TYPE_COUNT
+};
+
 typedef struct CellEntry {
     uint32_t key;
     uint32_t particleIndex;
@@ -52,7 +60,27 @@ typedef struct UniformBufferObject {
     float pressureMultiplier;
     float targetDensity;
     float visocosityStrength;
-    float volume; // smoothing kernel volume
+    float volume;
+    float nearPressureMultiplier;
+    int width;
+    int height;
+    float stepSize;
+    int frameCount;
+    float padA;
+    float padB;
+    Camera camera;
+    int renderType;
+    float densityCellSize;
+    float padC;
+    float padD;
+    vec3 extinctionCoefficients;
+    float padE;
+    vec3 dirToSun;
+    float lightMarchStepSize;
+    float fov;
+    int numRefractions;
+    float surfaceDensityThreshold;
+    float indexOfRefraction;
 } UniformBufferObject;
 
 typedef struct Vertex2D {
@@ -126,11 +154,19 @@ typedef struct vk_context {
     VkBuffer histogramsBuffer;
     VkDeviceMemory histogramsMemory;
 
+    VkBuffer nearDensitiesBuffers[2];
+    VkDeviceMemory nearDensitiesMemories[2];
+
     int sphereVertexCount;
 
     // Render pass + graphics pipeline
     VkRenderPass renderPass;
-    VkPipelineLayout graphicsPipelineLayout;
+    VkPipelineLayout rasterizeGraphicsPipelineLayout;
+    VkPipelineLayout raymarchGraphicsPipelineLayout;
+    VkPipeline rasterizeGraphicsPipeline;
+    VkPipeline raymarchGraphicsPipeline;
+
+    // compute shaders, pipeline and layout
     VkPipelineLayout updateCellEntriesComputePipelineLayout;
     VkPipelineLayout bitonicSortComputePipelineLayout;
     VkPipelineLayout updateVelocitiesComputePipelineLayout;
@@ -142,7 +178,10 @@ typedef struct vk_context {
     VkPipelineLayout scatterPassComputePipelineLayout;
     VkPipelineLayout multiRadixSortComputePipelineLayout;
     VkPipelineLayout multiRadixSortHistogramsComputePipelineLayout;
-    VkPipeline graphicsPipeline;
+    VkPipelineLayout volumetricFluidComputePipelineLayout;
+    VkPipelineLayout updateDensityMapComputePipelineLayout;
+    VkPipelineLayout calculateLightVolumeComputePipelineLayout;
+    VkPipelineLayout properFluidComputePipelineLayout;
     VkPipeline updateCellEntriesComputePipeline;
     VkPipeline bitonicSortComputePipeline;
     VkPipeline updateVelocitiesComputePipeline;
@@ -154,6 +193,10 @@ typedef struct vk_context {
     VkPipeline scatterPassComputePipeline;
     VkPipeline multiRadixSortComputePipeline;
     VkPipeline multiRadixSortHistogramsComputePipeline;
+    VkPipeline volumetricFluidComputePipeline;
+    VkPipeline updateDensityMapComputePipeline;
+    VkPipeline calculateLightVolumeComputePipeline;
+    VkPipeline properFluidComputePipeline;
     VkFramebuffer *swapchainFramebuffers;
 
     // Descriptors (uniforms)
@@ -163,6 +206,11 @@ typedef struct vk_context {
 
     int width;
     int height;
+
+    ivec3 raymarchCellSize;
+    ivec3 lightVolumeSize;
+
+    int renderType;
 
     // Uniform buffer
     VkBuffer uniformBuffer;
@@ -179,6 +227,18 @@ typedef struct vk_context {
     VkImageView storageImageView;
     VkDeviceMemory storageImageMemory;
     VkSampler storageSampler;
+
+    // Density map
+    VkImage densityMap;
+    VkImageView densityMapImageView;
+    VkDeviceMemory densityMapMemory;
+    VkSampler densityMapSampler;
+
+    // Light volume
+    VkImage lightVolume;
+    VkImageView lightVolumeImageView;
+    VkDeviceMemory lightVolumeMemory;
+    VkSampler lightVolumeSampler;
 
     // Dynamic pipeline bindings
     VkViewport viewport;
@@ -205,21 +265,20 @@ typedef struct vk_context {
     vec3 minXYZ;
     vec3 maxXYZ;
 
+    vec3 dirToSun;
+
     float particleRadius;
-
     int numSubsteps;
-
     int pause;
-
+    int slow;
     int numBlocksPerWorkGroup;
-
     int readTimeStamps;
-
     int numFramesRan;
-
     int totalFPS;
-
     float timestampPeriod;
+    float smoothingRadius;
+    float densityCellSize;
+    float lightMarchStepSize;
 
     double predictMS;
     double cellMS;
@@ -233,6 +292,8 @@ typedef struct vk_context {
     double renderMS;
     double totalMS;
 
+    vec3 extinctionCoefficients;
+
     // function pointers
     void (*initializePositionsBuffer) (struct vk_context *vko);
     void (*initializePredictedPositionsBuffer) (struct vk_context *vko);
@@ -244,6 +305,8 @@ typedef struct vk_context {
     void (*initializeColorsBuffer) (struct vk_context *vko);
     void (*initializeHistogramsBuffer) (struct vk_context *vko);
     void (*initializeEndIndicesBuffer) (struct vk_context *vko);
+    void (*initializeNearDensitiesBuffer) (struct vk_context *vko);
+    void (*initializeDensityMap) (struct vk_context *vko);
 } vk_context;
 
 #endif

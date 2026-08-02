@@ -6,15 +6,19 @@ void createDepthResources(vk_context *vko) {
     // going to use VK_FORMAT_D32_SFLOAT
     VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
 
-    createImage(vko, 
+    createImage(
+        vko, 
         vko->surfaceCapabilities.currentExtent.width, 
         vko->surfaceCapabilities.currentExtent.height,
+        1,
+        VK_IMAGE_TYPE_2D,
         depthFormat, 
         VK_IMAGE_TILING_OPTIMAL, 
         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, 
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 
-        &vko->depthImage, &vko->depthImageMemory
+        &vko->depthImage,
+        &vko->depthImageMemory
     );
 
-    createImageView(vko, vko->depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, &vko->depthImageView);
+    createImageView(vko, vko->depthImage, VK_IMAGE_VIEW_TYPE_2D, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, &vko->depthImageView);
 }

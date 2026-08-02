@@ -1,0 +1,148 @@
+#version 450
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+struct CellEntry {
+    uint key;
+    uint particleIndex;
+};
+layout (binding = 1, rgba32f) uniform writeonly image2D outputImage;
+layout (std430, binding = 2)  buffer PositionsBuffer           { vec4 positions[]; };
+layout (std430, binding = 3)  buffer VelocitiesBuffer          { vec4 velocities[]; };
+layout (std430, binding = 4)  buffer PredictedPositionsBuffer  { vec4 predictedPositions[]; };
+layout (std430, binding = 5)  buffer PredictedVelocitiesBuffer { vec4 predictedVelocities[]; };
+layout (std430, binding = 6)  buffer CellEntriesBuffer         { CellEntry cellEntries[]; };
+layout (std430, binding = 7)  buffer DensitiesBuffer           { float densities[]; };
+layout (std430, binding = 8)  buffer StartIndices              { int startIndices[]; };
+layout (std430, binding = 9)  buffer ColorBuffer               { vec4 colors[]; };
+// ... buffers in between are for ping pong, which arent needed in this shader
+layout (std430, binding = 18) buffer EndIndicesBuffer          { int endIndices[]; };
+
+layout (std430, binding = 19) buffer NearDensitiesBuffer             { float nearDensities[]; };
+layout (std430, binding = 20) buffer NearDensitiesOutputBuffer       { float nearDensitiesOutput[]; };
+layout (binding = 21, r32f) uniform writeonly image3D densityMap;
+
+struct Camera {
+    vec3 position;
+    float padA;
+    vec3 forward;
+    float padB;
+    vec3 right;
+    float padC;
+    vec3 up;
+    float padD;
+
+    // these will only be used on cpu side to compute camera
+    float yaw;
+    float pitch;
+    float lastX;
+    float lastY;
+};
+
+layout(binding = 0) uniform UniformBufferObject {
+    mat4 model;
+    mat4 view;
+    mat4 proj;
+    int numParticles;
+    float particleRadius;
+    float smoothingRadius;
+    float g;
+    vec3 minXYZ;
+    float dt;
+    vec3 maxXYZ;
+    float pad0;
+    float particleMass;
+    float pressureMultiplier;
+    float targetDensity;
+    float visocosityStrength;
+    float volume;
+    float nearPressureMultiplier;
+    int width;
+    int height;
+    float stepSize;
+    int frameCount;
+    float padA;
+    float padB;
+    Camera camera;
+    int renderType;
+    float densityCellSize;
+};
+
+uint cellCoordToHash(uvec3 cellCoord) {
+    uvec3 cell = uvec3(cellCoord);
+
+    uint h =
+        cell.x * 73856093u ^
+        cell.y * 19349663u ^
+        cell.z * 83492791u;
+
+    // Avalanche finalizer
+    h ^= h >> 16;
+    h *= 0x7feb352du;
+    h ^= h >> 15;
+    h *= 0x846ca68bu;
+    h ^= h >> 16;
+
+    return h;
+}
+
+uint cellHashToKey(uint cellHash) {
+    // numParticles must be a power of two
+    return cellHash & uint(numParticles - 1);
+}
+
+uint cellCoordToKey(uvec3 cellCoord) {
+    return cellHashToKey(cellCoordToHash(cellCoord));
+}
+
+bool outOfBounds(ivec3 voxelCoord) {
+    ivec3 maxVoxelSize = ivec3(ceil((maxXYZ - minXYZ) / densityCellSize));
+    return any(lessThan(voxelCoord, ivec3(0))) || any(greaterThan(voxelCoord, maxVoxelSize)) || all(equal(voxelCoord, maxVoxelSize));
+}
+
+float smoothingKernel(float dist) {
+    if (dist >= smoothingRadius) return 0;
+    return (smoothingRadius - dist) * (smoothingRadius - dist);
+}
+
+ivec3 samplePointToCellCoord(vec3 point) {
+    if (any(lessThan(point, minXYZ)) || any(greaterThan(point, maxXYZ))) return ivec3(-1);
+    ivec3 cellCoord = ivec3(floor((point - minXYZ) / smoothingRadius));
+    return cellCoord;
+}
+
+void main() {
+    // this is ran *per cell coord. per voxel*
+    ivec3 voxelCoord = ivec3(gl_GlobalInvocationID.xyz);
+    if (outOfBounds(voxelCoord)) return;
+
+    vec3 voxelCenter = minXYZ + (vec3(voxelCoord) + 0.5) * densityCellSize;
+
+    ivec3 voxelCell = samplePointToCellCoord(voxelCenter);
+
+    float density = 0;
+
+    for (int dz = -1; dz <= 1; dz++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                ivec3 cell = voxelCell + ivec3(dx, dy, dz);
+                if (outOfBounds(cell)) continue;
+                uint key = cellCoordToKey(cell);
+                int startIndex = startIndices[key];
+                if (startIndex == -1) continue;
+                int endIndex = endIndices[key];
+                for (int i = startIndex; i < endIndex; i++) {
+                    vec3 delta = voxelCenter - positions[i].xyz;
+                    float dist2 = dot(delta, delta);
+                    if (dist2 < smoothingRadius * smoothingRadius) {
+                        density += particleMass * smoothingKernel(sqrt(dist2));
+                    }
+                }
+            }
+        }
+    }
+
+    density *= 1.0;
+
+    imageStore(densityMap, voxelCoord, vec4(density / volume));
+}

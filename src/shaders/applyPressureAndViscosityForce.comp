@@ -17,7 +17,9 @@ layout(binding = 0) uniform UniformBufferObject {
     float particleMass;
     float pressureMultiplier;
     float targetDensity;
-    float viscosityStrength;
+    float visocosityStrength;
+    float volume;
+    float nearPressureMultiplier;
 };
 struct CellEntry {
     uint key;
@@ -34,6 +36,9 @@ layout (std430, binding = 8)  buffer StartIndices              { int startIndice
 layout (std430, binding = 9)  buffer ColorBuffer               { vec4 colors[]; };
 // ... buffers in between are for ping pong, which arent needed in this shader
 layout (std430, binding = 18) buffer EndIndicesBuffer          { int endIndices[]; };
+
+layout (std430, binding = 19) buffer NearDensitiesBuffer             { float nearDensities[]; };
+layout (std430, binding = 20) buffer NearDensitiesOutputBuffer       { float nearDensitiesOutput[]; };
 
 uint cellCoordToHash(uvec3 cellCoord) {
     uvec3 cell = uvec3(cellCoord);
@@ -91,6 +96,16 @@ float viscositySmoothingKernel(float dist) {
     return (smoothingRadius - dist) * (smoothingRadius - dist);
 }
 
+float nearDensitySmoothingKernelDerivative(float dist) {
+    if (dist >= smoothingRadius)
+        return 0.0;
+
+    float x = smoothingRadius - dist;
+    float scale = -45.0 / (PI * pow(smoothingRadius, 6));
+
+    return x * x * scale;
+}
+
 float convertDensityToPressure(float density) { // experiment with better conversions
     float densityError = density - targetDensity;
     float pressure = densityError * pressureMultiplier;
@@ -103,14 +118,19 @@ float calculateSharedPressure(float densityA, float densityB) {
     return (pressureA + pressureB) / 2;
 }
 
-void calculatePressureAndViscosityForce(int particleIndex, out vec3 pressureForce, out vec3 viscosityForce) {
+void calculatePressureAndViscosityForce(int particleIndex, out vec3 pressureForce, out vec3 viscosityForce, out vec3 nearPressureForce) {
     vec3 samplePoint = predictedPositions[particleIndex].xyz;
-    vec3 particleVelocity = velocities[particleIndex].xyz;
+    vec3 particleVelocity = predictedVelocities[particleIndex].xyz;
     pressureForce = vec3(0);
+    nearPressureForce = vec3(0);
     viscosityForce = vec3(0);
     float myDensity = densities[particleIndex];
     float R2 = smoothingRadius * smoothingRadius;
     ivec3 particleCell = samplePointToCellCoord(samplePoint);
+
+    float nearDensity = nearDensities[particleIndex];
+    float nearPressure = nearDensity * nearPressureMultiplier;
+
     for (int dz = -1; dz <= 1; dz++) {
         for (int dy = -1; dy <= 1; dy++) {
             for (int dx = -1; dx <= 1; dx++) {
@@ -127,17 +147,24 @@ void calculatePressureAndViscosityForce(int particleIndex, out vec3 pressureForc
                     float dist2 = dot(d, d);
                     if (dist2 > R2) continue;
                     float dist = sqrt(dist2);
-                    vec3 dir = abs(dist) < 1e-4 ? 
-                        vec3(0, 0, 1) :  // fuck it why not man. idk anymore just try this for now
-                        d / dist;
+                    if (abs(dist) < 1e-7) continue;
+                    vec3 dir = d / dist;
                     float slope = smoothingKernelDerivative(dist); // essentially get second order intensity
                     float density = densities[i];
                     float sharedPressure = calculateSharedPressure(density, myDensity); // calculated shared pressure between this particle at particleIndex and the other particle
                     vec3 contribution = sharedPressure * slope * particleMass / density * dir;
-                    pressureForce = pressureForce + contribution;
+                    pressureForce += contribution;
 
                     float influence = viscositySmoothingKernel(dist);
                     viscosityForce = viscosityForce + particleMass * influence / densities[i] * (velocities[i].xyz - particleVelocity);
+
+                    // calculate near pressure force
+                    float neighborNearDensity = nearDensities[i];
+                    float neighborNearPressure = neighborNearDensity * nearPressureMultiplier;
+                    float sharedNearPressure = (nearPressure + neighborNearPressure) / 2;
+
+                    vec3 nearDensityContribution = sharedNearPressure * nearDensitySmoothingKernelDerivative(dist) * particleMass / neighborNearDensity * dir;
+                    pressureForce += nearDensityContribution;
                 }
             }
         }
@@ -150,6 +177,7 @@ void main() {
     int particleIndex = int(gl_GlobalInvocationID.x);
     vec3 pressureForce;
     vec3 viscosityForce;
-    calculatePressureAndViscosityForce(particleIndex, pressureForce, viscosityForce);
-    velocities[particleIndex] += vec4((pressureForce + viscosityForce) / densities[particleIndex] * dt, 1);
+    vec3 nearPressureForce;
+    calculatePressureAndViscosityForce(particleIndex, pressureForce, viscosityForce, nearPressureForce);
+    velocities[particleIndex] += vec4((pressureForce + viscosityForce + nearPressureForce) / densities[particleIndex] * dt, 1);
 }

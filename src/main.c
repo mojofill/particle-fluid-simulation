@@ -9,8 +9,9 @@
 // #define PAUSE_ON_START
 
 #define NUM_PARTICLES (1 << 18)
-#define PARTICLE_RADIUS 0.2
+#define PARTICLE_RADIUS 0.3
 #define SMOOTHING_RADIUS 2.5
+#define DENSITY_CELL_SIZE 0.5 // dont change this idk why it doesnt work when not exactly smoothing radius
 #define GRAVITY 100
 #define NUM_SUBSTEPS 1
 #define DELTA_TIME 0.01
@@ -18,6 +19,18 @@
 #define PRESSURE_MULTIPLIER 15000
 #define TARGET_DENSITY 1.0
 #define VISCOSITY_STRENGTH 0.0
+#define NEAR_PRESSURE_MULTIPLIER 0 // increase this for more "surface tension" kind of feel
+#define STEP_SIZE 0.01 // for volumetric rendering step size
+#define LIGHT_MARCH_STEP_SIZE 1 // might still be too much, try increasing this
+#define FOV (0.9 * GLM_PI_2)
+#define SLOW_FACTOR 0.05
+#define CAMERA_SLOW_FACTOR 1
+#define NUM_REFRACTIONS 3
+#define SURFACE_DENSITY_THRESHOLD 0.75
+#define INDEX_OF_REFRACTION 1.333
+
+// #define RENDER_TYPE RASTERIZATION
+#define RENDER_TYPE RAYMARCH_FLUID
 
 float volume; // initialize this during runtime
 
@@ -28,12 +41,12 @@ void updateUniforms(vk_context *vko, uint32_t currentFrame) {
     Camera cam = vko->camera;
 
     vec3 forward;
-    glm_vec3_add(cam.pos, cam.dir, forward);
-    glm_lookat(cam.pos, forward, (vec3){0.0f, 0.0f, 1.0f}, ubo.view);
+    glm_vec3_add(cam.position, cam.forward, forward);
+    glm_lookat(cam.position, forward, (vec3){0.0f, 0.0f, 1.0f}, ubo.view);
 
-    float width = (float) vko->surfaceCapabilities.currentExtent.width;
-    float height = (float) vko->surfaceCapabilities.currentExtent.height;
-    glm_perspective(GLM_PI_4, width / height, 0.1f, 10000.0f, ubo.proj);
+    int width = vko->surfaceCapabilities.currentExtent.width;
+    int height = vko->surfaceCapabilities.currentExtent.height;
+    glm_perspective(FOV, width / (float) height, 0.1f, 10000.0f, ubo.proj);
 
     ubo.proj[1][1] *= -1; // flip image upside down bc vulkan and opengl y axes are flipped
 
@@ -41,15 +54,29 @@ void updateUniforms(vk_context *vko, uint32_t currentFrame) {
     ubo.particleRadius = PARTICLE_RADIUS;
     ubo.smoothingRadius = SMOOTHING_RADIUS;
     ubo.g = GRAVITY;
-    ubo.dt = DELTA_TIME / (float) NUM_SUBSTEPS;
+    ubo.dt = DELTA_TIME / (float) NUM_SUBSTEPS * (vko->slow ? SLOW_FACTOR : 1);
     ubo.particleMass = PARTICLE_MASS;
     ubo.pressureMultiplier = PRESSURE_MULTIPLIER;
     ubo.targetDensity = TARGET_DENSITY;
     ubo.visocosityStrength = VISCOSITY_STRENGTH;
     ubo.volume = volume;
+    ubo.nearPressureMultiplier = NEAR_PRESSURE_MULTIPLIER;
+    ubo.width = width;
+    ubo.height = height;
+    ubo.stepSize = STEP_SIZE;
+    ubo.frameCount = vko->numFramesRan;
+    ubo.camera = vko->camera;
+    ubo.densityCellSize = DENSITY_CELL_SIZE;
+    ubo.lightMarchStepSize = LIGHT_MARCH_STEP_SIZE;
+    ubo.fov = FOV;
+    ubo.numRefractions = NUM_REFRACTIONS;
+    ubo.surfaceDensityThreshold = SURFACE_DENSITY_THRESHOLD;
+    ubo.indexOfRefraction = INDEX_OF_REFRACTION;
 
+    glm_vec3_copy(vko->extinctionCoefficients, ubo.extinctionCoefficients);
     glm_vec3_copy(vko->minXYZ, ubo.minXYZ);
     glm_vec3_copy(vko->maxXYZ, ubo.maxXYZ);
+    glm_vec3_copy(vko->dirToSun, ubo.dirToSun);
 
     memcpy(vko->uniformBufferMapped, &ubo, sizeof(UniformBufferObject));
 }
@@ -67,10 +94,47 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
         vko->initializeColorsBuffer(vko);
         vko->initializeHistogramsBuffer(vko);
         vko->initializeEndIndicesBuffer(vko);
+        vko->initializeNearDensitiesBuffer(vko);
     }
     else if (key == GLFW_KEY_P && action == GLFW_PRESS) {
         vk_context *vko = glfwGetWindowUserPointer(window);
         vko->pause = vko->pause == 0 ? 1 : 0;
+    }
+    else if (key == GLFW_KEY_B && action == GLFW_PRESS) {
+        vk_context *vko = glfwGetWindowUserPointer(window);
+        vko->renderType = (vko->renderType + 1) % RENDER_TYPE_COUNT;
+        if (vko->renderType == RAYMARCH_VOLUMETRIC) {
+            vko->renderType = (vko->renderType + 1) % RENDER_TYPE_COUNT;
+        }
+    }
+    else if (key == GLFW_KEY_C && action == GLFW_PRESS) {
+        vk_context *vko = glfwGetWindowUserPointer(window);
+        vko->slow = (vko->slow + 1) % 2;
+    }
+}
+
+void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
+    if ((button == GLFW_MOUSE_BUTTON_LEFT || button == GLFW_MOUSE_BUTTON_RIGHT) && action == GLFW_RELEASE) {
+        vk_context *vko = glfwGetWindowUserPointer(window);
+        vko->pause = vko->pause == 0 ? 1 : 0;
+    }
+    else if (button == GLFW_MOUSE_BUTTON_MIDDLE && action == GLFW_RELEASE) {
+        vk_context *vko = glfwGetWindowUserPointer(window);
+        vko->renderType = (vko->renderType + 1) % RENDER_TYPE_COUNT;
+        if (vko->renderType == RAYMARCH_VOLUMETRIC) {
+            vko->renderType = (vko->renderType + 1) % RENDER_TYPE_COUNT;
+        }
+    }
+}
+
+void scrollCallback(GLFWwindow* window, double xoffset, double yoffset) {
+    vk_context *vko = glfwGetWindowUserPointer(window);
+    int s = yoffset > 0 ? -1 : 1;
+    vko->renderType = (vko->renderType + s) % RENDER_TYPE_COUNT;
+    if (vko->renderType < 0) vko->renderType = RENDER_TYPE_COUNT - 1;
+    if (vko->renderType == RAYMARCH_VOLUMETRIC) {
+        vko->renderType = (vko->renderType + s) % RENDER_TYPE_COUNT;
+        if (vko->renderType < 0) vko->renderType = RENDER_TYPE_COUNT - 1;
     }
 }
 
@@ -86,13 +150,15 @@ void mainLoop(vk_context *vko) {
     vko->camera.lastY = ypos;
 
     glfwSetKeyCallback(vko->window, keyCallback);
+    glfwSetMouseButtonCallback(vko->window, mouseButtonCallback);
+    glfwSetScrollCallback(vko->window, scrollCallback);
 
     while (!glfwWindowShouldClose(vko->window)) {
         glfwPollEvents();
         if (glfwGetKey(vko->window, GLFW_KEY_ESCAPE)) {
             glfwSetWindowShouldClose(vko->window, VK_TRUE);
         }
-        cameraProcessInputs(&vko->camera, vko->window);
+        cameraProcessInputs(&vko->camera, vko->window, vko->slow ? CAMERA_SLOW_FACTOR : 1);
         updateUniforms(vko, currentFrame);
         drawFrame(vko, &currentFrame);
 
@@ -171,15 +237,13 @@ void initializeSphereMeshBuffer(vk_context *vko) {
 
 void initializeCamera(vk_context *vko) {
     vko->camera = (Camera) {
-        .pos = {0, -100, 10},
+        .position = { 0, -100, 10 },
+        .forward = { 0, 1, 0 },
+        .right = { 1, 0, 0 },
+        .up = { 0, 0, 1 },
         .pitch = 0,
         .yaw = M_PI_2
     };
-
-    vko->camera.dir[0] = cosf(vko->camera.pitch) * cosf(vko->camera.yaw);
-    vko->camera.dir[1] = cosf(vko->camera.pitch) * sinf(vko->camera.yaw);
-    vko->camera.dir[2] = sinf(vko->camera.pitch);
-    glm_normalize(vko->camera.dir);
 
     vko->camera.lastX = vko->width/2;
     vko->camera.lastY = vko->height/2;
@@ -352,11 +416,12 @@ int main() {
     vko.numParticles = NUM_PARTICLES;
     vko.particleRadius = PARTICLE_RADIUS;
     
-    float s = 50;
-    vec3 minXYZ = {-1.5 * s, -0.75 * s, -1.00 * s};
-    vec3 maxXYZ = {1.5 * s, 0.75 * s, 1.00 * s};
+    float s = 60;
+    vec3 minXYZ = {-1.0 * s, -1.00 * s, -1.00 * s};
+    vec3 maxXYZ = {1.0 * s, 1.00 * s, 1.00 * s};
     
     vko.numSubsteps = NUM_SUBSTEPS;
+    vko.smoothingRadius = SMOOTHING_RADIUS;
     
     #ifdef PAUSE_ON_START
         vko.pause = 1;
@@ -371,9 +436,22 @@ int main() {
     #endif
 
     vko.numFramesRan = 0;
+    vko.renderType = RENDER_TYPE;
 
     vko.ping = 0;
     vko.numBlocksPerWorkGroup = NUM_BLOCKS_PER_WORKGROUP;
+    vko.densityCellSize = DENSITY_CELL_SIZE;
+    vko.lightMarchStepSize = LIGHT_MARCH_STEP_SIZE;
+
+    vec3 extinctionCoefficients = {0.025, 0.020, 0.015};
+    glm_vec3_scale(extinctionCoefficients, 0.25, extinctionCoefficients);
+    // vec3 extinctionCoefficients = {3, 2, 1};
+    // glm_vec3_scale(extinctionCoefficients, 0.01, extinctionCoefficients);
+    vec3 dirToSun = {0.75, -0.25, 0.5};
+    glm_normalize(dirToSun);
+
+    glm_vec3_copy(extinctionCoefficients, vko.extinctionCoefficients);
+    glm_vec3_copy(dirToSun, vko.dirToSun);
 
     // if (!isPowerOfTwo(NUM_PARTICLES)) {
     //     printf("NUM_PARTICLES must be a power of 2\n");

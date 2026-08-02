@@ -42,6 +42,11 @@ layout (std430, binding = 14) buffer DensitiesOutputBuffer           { float den
 layout (std430, binding = 15) buffer ColorOutputBuffer               { vec4 colorsOutput[]; };
 layout (std430, binding = 16) buffer CellEntriesOutputBuffer         { CellEntry cellEntriesOutput[]; };
 
+// this is after ive already written all the above, im not going to shift all the bindings bro
+// 17 = histograms, 18 = endIndices
+layout (std430, binding = 19) buffer NearDensitiesBuffer             { float nearDensities[]; };
+layout (std430, binding = 20) buffer NearDensitiesOutputBuffer       { float nearDensitiesOutput[]; };
+
 void main() {
     if (gl_GlobalInvocationID.x >= numParticles) return;
 
@@ -54,12 +59,7 @@ void main() {
     predictedVelocitiesOutput[particleIndex] = predictedVelocities[oldParticleIndex];
     densitiesOutput[particleIndex] = densities[oldParticleIndex];
     colorsOutput[particleIndex] = colors[oldParticleIndex];
+    nearDensitiesOutput[particleIndex] = nearDensities[particleIndex];
 
     cellEntries[particleIndex].particleIndex = particleIndex;
-
-    // BE CAREFUL HERE!!! IF USING BITONIC SORT, THEN KEEP THIS
-    cellEntriesOutput[particleIndex] = cellEntries[particleIndex];
-
-    // OTHERWISE, DO NOT DO THIS!!
-    
 }

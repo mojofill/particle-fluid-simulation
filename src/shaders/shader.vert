@@ -41,7 +41,12 @@ void main() {
 
     particleIndex = int(gl_InstanceIndex);
     fragQuadPos = quadPos;
-    if (particlePos.z <= minXYZ.z + 2 * particleRadius) {
+    if (particlePos.x <= minXYZ.x + 2 * particleRadius ||
+        particlePos.y <= minXYZ.y + 2 * particleRadius ||
+        particlePos.z <= minXYZ.z + 2 * particleRadius ||
+        particlePos.x >= maxXYZ.x - 2 * particleRadius ||
+        particlePos.y >= maxXYZ.y - 2 * particleRadius
+        ) {
         shouldDiscard = 1;
     }
     else {

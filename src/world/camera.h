@@ -9,14 +9,22 @@
 #define sensitivity 0.002f
 
 typedef struct Camera {
-    vec3 pos;
-    vec3 dir;
-    float pitch;
+    vec3 position;
+    float padA;
+    vec3 forward;
+    float padB;
+    vec3 right;
+    float padC;
+    vec3 up;
+    float padD;
+
+    // these will only be used on cpu side to compute camera
     float yaw;
+    float pitch;
     float lastX;
     float lastY;
 } Camera;
 
-void cameraProcessInputs(Camera *cam, GLFWwindow *window);
+void cameraProcessInputs(Camera *cam, GLFWwindow *window, float speedScale);
 
 #endif

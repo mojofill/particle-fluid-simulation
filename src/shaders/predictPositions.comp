@@ -103,7 +103,7 @@ void main() {
     if (pos.z < minXYZ.z + particleRadius) {
         pos.z = minXYZ.z + particleRadius;
         vel.z *= -1;
-        vel *= 0.95;
+        vel.z *= 0.95;
     }
     else if (pos.z > maxXYZ.z - particleRadius) {
         pos.z = maxXYZ.z - particleRadius;

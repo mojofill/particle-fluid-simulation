@@ -36,6 +36,9 @@ layout (std430, binding = 9)  buffer ColorBuffer               { vec4 colors[]; 
 // ... buffers in between are for ping pong, which arent needed in this shader
 layout (std430, binding = 18) buffer EndIndicesBuffer          { int endIndices[]; };
 
+layout (std430, binding = 19) buffer NearDensitiesBuffer             { float nearDensities[]; };
+layout (std430, binding = 20) buffer NearDensitiesOutputBuffer       { float nearDensitiesOutput[]; };
+
 uint cellCoordToHash(uvec3 cellCoord) {
     uvec3 cell = uvec3(cellCoord);
 
@@ -76,6 +79,11 @@ float smoothingKernel(float dist) {
     return (smoothingRadius - dist) * (smoothingRadius - dist);
 }
 
+float nearDensitySmoothingKernel(float dist) {
+    if (dist >= smoothingRadius) return 0;
+    return (smoothingRadius - dist) * (smoothingRadius - dist) * (smoothingRadius - dist);
+}
+
 float smoothingKernelDerivative(float dist) {
     if (dist >= smoothingRadius) return 0.0f;
     
@@ -85,7 +93,7 @@ float smoothingKernelDerivative(float dist) {
     return (dist - smoothingRadius) * scale;
 }
 
-float calculateDensity(vec3 samplePoint) {
+void calculateDensity(vec3 samplePoint, out float density, out float nearDensity) {
     /*
     loop through all particles within smoothingRadius of samplePoint
     can do this via space partitioning
@@ -99,7 +107,10 @@ float calculateDensity(vec3 samplePoint) {
     return totalMass / volume
     */
 
+    float nearDensityVolumeInverse = 15.0 / (PI * pow(smoothingRadius, 6));
+
     float totalMass = 0;
+    float totalNearMass = 0;
     for (int dz = -1; dz <= 1; dz++) {
         for (int dy = -1; dy <= 1; dy++) {
             for (int dx = -1; dx <= 1; dx++) {
@@ -113,12 +124,14 @@ float calculateDensity(vec3 samplePoint) {
                     float dist = distance(particlePos, samplePoint);
                     float influence = smoothingKernel(dist);
                     totalMass += particleMass * influence;
+                    totalNearMass += particleMass * nearDensitySmoothingKernel(dist);
                 }
             }
         }
     }
 
-    return totalMass / volume;
+    density = totalMass / volume;
+    nearDensity = totalNearMass * nearDensityVolumeInverse;
 }
 
 void main() {
@@ -127,6 +140,16 @@ void main() {
     int particleIndex = int(gl_GlobalInvocationID.x);
     vec3 predictedPos = predictedPositions[particleIndex].xyz;
 
-    densities[particleIndex] = calculateDensity(predictedPos);
-    densities[particleIndex] = max(0.01, densities[particleIndex]); // can try taking this out to see if its better later
+    float density;
+    float nearDensity;
+
+    calculateDensity(predictedPos, density, nearDensity);
+
+    densities[particleIndex] = density;
+    nearDensities[particleIndex] = nearDensity;
+    // try messing with the min densities to see what makes it better
+    densities[particleIndex] = max(0.01, densities[particleIndex]);
+    nearDensities[particleIndex] = max(0.01, nearDensities[particleIndex]);
+
+    // also, just because
 }

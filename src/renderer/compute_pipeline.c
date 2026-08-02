@@ -40,7 +40,7 @@ void createComputePipeline(vk_context *vko, VkPipelineLayout *pComputePipelineLa
     vkDestroyShaderModule(vko->device, module, NULL);
 }
 
-void createImageMemoryBarrier(vk_context *vko, VkImage image, VkCommandBuffer commandBuffer) {
+void createImageMemoryBarrier(vk_context *vko, VkImage image, VkCommandBuffer commandBuffer, VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask, VkAccessFlags srcAccessMask, VkAccessFlags dstAccessMask) {
     VkImageMemoryBarrier barrier = {0};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -54,13 +54,13 @@ void createImageMemoryBarrier(vk_context *vko, VkImage image, VkCommandBuffer co
     barrier.subresourceRange.baseArrayLayer = 0;
     barrier.subresourceRange.layerCount = 1;
     // synchronization settings
-    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.srcAccessMask = srcAccessMask;
+    barrier.dstAccessMask = dstAccessMask;
 
     vkCmdPipelineBarrier(
         commandBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        srcStageMask,
+        dstStageMask,
         0, 0, NULL, 0, NULL, 1, &barrier
     );
 }

@@ -4,7 +4,7 @@
 void createDescriptorSetLayout(vk_context *vko) {
     // update these to account for ping pong
 
-    VkDescriptorSetLayoutBinding bindings[19];
+    VkDescriptorSetLayoutBinding bindings[26];
 
     VkDescriptorSetLayoutBinding uboLayoutBinding = {0};
     uboLayoutBinding.binding = 0;
@@ -31,8 +31,9 @@ void createDescriptorSetLayout(vk_context *vko) {
     // and one more cellEntriesOutput buffer for radix sort
     // and one more histogramsBuffer for radix sort
     // and one more endIndices buffer (for optimization)
-    // so 18 in total
-    for (int binding = 2; binding < 19; binding++) {
+    // and two more for nearDensities (ping pong
+    // so 21 in total
+    for (int binding = 2; binding < 21; binding++) {
         VkDescriptorSetLayoutBinding SSBOLayoutBinding = {0};
         SSBOLayoutBinding.binding = binding;
         SSBOLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -40,6 +41,45 @@ void createDescriptorSetLayout(vk_context *vko) {
         SSBOLayoutBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         bindings[binding] = SSBOLayoutBinding;
     }
+
+    // next is densityMap - storage image version
+    VkDescriptorSetLayoutBinding densityMapImageLayoutBinding = {0};
+    densityMapImageLayoutBinding.binding = 21;
+    densityMapImageLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    densityMapImageLayoutBinding.descriptorCount = 1;
+    densityMapImageLayoutBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    
+    // finally, i need a sampler version for texture trilinear interpolation
+    VkDescriptorSetLayoutBinding densityMapSamplerLayoutBinding = {0};
+    densityMapSamplerLayoutBinding.binding = 22;
+    densityMapSamplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    densityMapSamplerLayoutBinding.descriptorCount = 1;
+    densityMapSamplerLayoutBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    
+    // same thing for light volume
+    VkDescriptorSetLayoutBinding lightVolumeImageLayoutBinding = {0};
+    lightVolumeImageLayoutBinding.binding = 23;
+    lightVolumeImageLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    lightVolumeImageLayoutBinding.descriptorCount = 1;
+    lightVolumeImageLayoutBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutBinding lightVolumeSamplerLayoutBinding = {0};
+    lightVolumeSamplerLayoutBinding.binding = 24;
+    lightVolumeSamplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    lightVolumeSamplerLayoutBinding.descriptorCount = 1;
+    lightVolumeSamplerLayoutBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutBinding storageSamplerLayoutBinding = {0};
+    storageSamplerLayoutBinding.binding = 25;
+    storageSamplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    storageSamplerLayoutBinding.descriptorCount = 1;
+    storageSamplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    bindings[21] = densityMapImageLayoutBinding;
+    bindings[22] = densityMapSamplerLayoutBinding;
+    bindings[23] = lightVolumeImageLayoutBinding;
+    bindings[24] = lightVolumeSamplerLayoutBinding;
+    bindings[25] = storageSamplerLayoutBinding;
 
     VkDescriptorSetLayoutCreateInfo layoutInfo = {0};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -60,7 +100,7 @@ void createUniformBuffer(vk_context *vko) {
 }
 
 void createDescriptorPool(vk_context *vko) {
-    VkDescriptorPoolSize poolSizes[19]; // adjust for however many uniforms you want
+    VkDescriptorPoolSize poolSizes[26]; // adjust for however many uniforms you want
     // only one singular uniform buffer object needs to be allocated
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = (uint32_t) MAX_FRAMES_IN_FLIGHT;
@@ -68,10 +108,26 @@ void createDescriptorPool(vk_context *vko) {
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     poolSizes[1].descriptorCount = (uint32_t) MAX_FRAMES_IN_FLIGHT;
 
-    for (int i = 2; i < 19; i++) {
+    for (int i = 2; i < 21; i++) {
         poolSizes[i].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         poolSizes[i].descriptorCount = (uint32_t) MAX_FRAMES_IN_FLIGHT;
     }
+
+    poolSizes[21].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    poolSizes[21].descriptorCount = (uint32_t) MAX_FRAMES_IN_FLIGHT;
+
+    poolSizes[22].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[22].descriptorCount = (uint32_t) MAX_FRAMES_IN_FLIGHT;
+
+    poolSizes[23].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    poolSizes[23].descriptorCount = (uint32_t) MAX_FRAMES_IN_FLIGHT;
+
+    poolSizes[24].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[24].descriptorCount = (uint32_t) MAX_FRAMES_IN_FLIGHT;
+
+    // storageSampler
+    poolSizes[25].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[25].descriptorCount = (uint32_t) MAX_FRAMES_IN_FLIGHT;
 
     VkDescriptorPoolCreateInfo poolInfo = {0};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -220,8 +276,32 @@ void createDescriptorSets(vk_context *vko) {
         endIndicesBufferInfo.offset = 0;
         endIndicesBufferInfo.range = VK_WHOLE_SIZE;
 
+        // nearDensitiesBuffer
+        VkDescriptorBufferInfo nearDensitiesBufferInfo = {0};
+        nearDensitiesBufferInfo.buffer = vko->nearDensitiesBuffers[ping];
+        nearDensitiesBufferInfo.offset = 0;
+        nearDensitiesBufferInfo.range = VK_WHOLE_SIZE;
+
+        // nearDensitiesOutputBuffer
+        VkDescriptorBufferInfo nearDensitiesOutputBufferInfo = {0};
+        nearDensitiesOutputBufferInfo.buffer = vko->nearDensitiesBuffers[ping_opp];
+        nearDensitiesOutputBufferInfo.offset = 0;
+        nearDensitiesOutputBufferInfo.range = VK_WHOLE_SIZE;
+
+        // densityMap
+        VkDescriptorImageInfo densityMapImageInfo = {0};
+        densityMapImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        densityMapImageInfo.imageView = vko->densityMapImageView;
+        densityMapImageInfo.sampler = vko->densityMapSampler;
+
+        // lightVolume
+        VkDescriptorImageInfo lightVolumeImageInfo = {0};
+        lightVolumeImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        lightVolumeImageInfo.imageView = vko->lightVolumeImageView;
+        lightVolumeImageInfo.sampler = vko->lightVolumeSampler;
+
         // write to descriptor set
-        VkWriteDescriptorSet descriptorWrites[19] = {0}; // can add more descriptor sets if necessary
+        VkWriteDescriptorSet descriptorWrites[26] = {0}; // can add more descriptor sets if necessary
         // such as samplers or storage buffers
 
         descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -375,6 +455,62 @@ void createDescriptorSets(vk_context *vko) {
         descriptorWrites[18].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         descriptorWrites[18].descriptorCount = 1;
         descriptorWrites[18].pBufferInfo = &endIndicesBufferInfo;
+
+        descriptorWrites[19].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[19].dstSet = vko->descriptorSets[ping];
+        descriptorWrites[19].dstBinding = 19; // binding = 19 in the shader
+        descriptorWrites[19].dstArrayElement = 0;
+        descriptorWrites[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        descriptorWrites[19].descriptorCount = 1;
+        descriptorWrites[19].pBufferInfo = &nearDensitiesBufferInfo;
+
+        descriptorWrites[20].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[20].dstSet = vko->descriptorSets[ping];
+        descriptorWrites[20].dstBinding = 20; // binding = 20 in the shader
+        descriptorWrites[20].dstArrayElement = 0;
+        descriptorWrites[20].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        descriptorWrites[20].descriptorCount = 1;
+        descriptorWrites[20].pBufferInfo = &nearDensitiesOutputBufferInfo;
+
+        descriptorWrites[21].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[21].dstSet = vko->descriptorSets[ping];
+        descriptorWrites[21].dstBinding = 21; // binding = 21 in the shader
+        descriptorWrites[21].dstArrayElement = 0;
+        descriptorWrites[21].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        descriptorWrites[21].descriptorCount = 1;
+        descriptorWrites[21].pImageInfo = &densityMapImageInfo;
+
+        descriptorWrites[22].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[22].dstSet = vko->descriptorSets[ping];
+        descriptorWrites[22].dstBinding = 22; // binding = 22 in the shader
+        descriptorWrites[22].dstArrayElement = 0;
+        descriptorWrites[22].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        descriptorWrites[22].descriptorCount = 1;
+        descriptorWrites[22].pImageInfo = &densityMapImageInfo;
+
+        descriptorWrites[23].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[23].dstSet = vko->descriptorSets[ping];
+        descriptorWrites[23].dstBinding = 23; // binding = 23 in the shader
+        descriptorWrites[23].dstArrayElement = 0;
+        descriptorWrites[23].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        descriptorWrites[23].descriptorCount = 1;
+        descriptorWrites[23].pImageInfo = &lightVolumeImageInfo;
+
+        descriptorWrites[24].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[24].dstSet = vko->descriptorSets[ping];
+        descriptorWrites[24].dstBinding = 24; // binding = 24 in the shader
+        descriptorWrites[24].dstArrayElement = 0;
+        descriptorWrites[24].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        descriptorWrites[24].descriptorCount = 1;
+        descriptorWrites[24].pImageInfo = &lightVolumeImageInfo;
+
+        descriptorWrites[25].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[25].dstSet = vko->descriptorSets[ping];
+        descriptorWrites[25].dstBinding = 25; // binding = 25 in the shader
+        descriptorWrites[25].dstArrayElement = 0;
+        descriptorWrites[25].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        descriptorWrites[25].descriptorCount = 1;
+        descriptorWrites[25].pImageInfo = &imageInfo;
 
         vkUpdateDescriptorSets(vko->device, (int) sizeof(descriptorWrites) / sizeof(VkWriteDescriptorSet), descriptorWrites, 0, NULL);
     }
