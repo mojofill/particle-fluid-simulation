@@ -255,7 +255,7 @@ vec3 getSurfaceNormal(vec3 pos) {
     vec3 faceNormal = calculateClosestFaceNormal(volumeSize, pos);
     float smoothDst = 0.3;
     float smoothPow = 5;
-    faceWeight = (1 - smoothstep(0, smoothDst, faceWeight)) * (1 - pow(clamp(volumeNormal.y, 0, 1), smoothPow));
+    faceWeight = (1 - smoothstep(0, smoothDst, faceWeight)) * (1 - pow(clamp(volumeNormal.z, 0, 1), smoothPow));
 
     return normalize(volumeNormal * (1 - faceWeight) + faceNormal * (faceWeight));
 }
@@ -426,6 +426,7 @@ const vec3 QUAD_POS_NEG = vec3(0.98, 0.95, 0.72); // soft yellow
 const float HUE_VARIATION = 0.04;
 
 vec3 environmentLight(Ray ray) {
+    return vec3(1);
     //---------------------------------------
     // Ground plane
     //---------------------------------------
@@ -481,10 +482,13 @@ vec3 environmentLight(Ray ray) {
 
     vec3 horizon = vec3(1);
     vec3 zenith = vec3(0.50, 0.75, 1.00);
+    // vec3 zenith = vec3(1);
 
-    vec3 sky = mix(horizon, zenith, pow(t, 2.0));
+    float e = 2;
 
-    float glow = exp(-25.0 * ray.dir.z * ray.dir.z);
+    vec3 sky = mix(horizon, zenith, pow(t, e));
+
+    float glow = 0 * exp(-25.0 * ray.dir.z * ray.dir.z);
 
     return sky + glow * vec3(0.3);
 }

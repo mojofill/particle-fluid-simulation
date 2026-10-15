@@ -200,9 +200,11 @@ vec3 marchRay(Ray ray) {
     float densityAlongViewRay = 0;
     vec3 volumeSize = maxXYZ - minXYZ;
 
-    vec3 totalLight = vec3(0);
+    vec3 totalLight = vec3(0.0);
 
-    vec3 scaledextinctionCoefficients = 10 * normalize(extinctionCoefficients);
+    float densityScale = 0.05;
+
+    vec3 scaledExtinctionCoefficients = 1 * normalize(extinctionCoefficients);
 
     for (float t = max(hitData.tNear, 0) + stepSize; t < hitData.tFar - stepSize; t += stepSize) {
         vec3 samplePoint = ray.origin + t * ray.dir;
@@ -210,19 +212,21 @@ vec3 marchRay(Ray ray) {
         // convert to normalized coordinates in AABB
         vec3 uvw = (samplePoint - minXYZ) / volumeSize;
         uvw = clamp(uvw, 0.0, 1.0);
-        float densityAlongStep = texture(densityMap, uvw).r;
+        float densityAlongStep = texture(densityMap, uvw).r * densityScale;
 
         densityAlongViewRay += densityAlongStep * stepSize;
 
         float densityAlongSunRay = texture(lightVolume, uvw).r;
-        vec3 transmittedSunLight = exp(-densityAlongSunRay * scaledextinctionCoefficients) * ambientSkyColor;
-        vec3 inScatteredLight = transmittedSunLight * densityAlongStep * scaledextinctionCoefficients;
-        vec3 viewRayTransmittance = exp(-densityAlongViewRay * scaledextinctionCoefficients);
+        vec3 transmittedSunLight = exp(-densityAlongSunRay * scaledExtinctionCoefficients) * ambientSkyColor;
+        vec3 inScatteredLight = transmittedSunLight * densityAlongStep * scaledExtinctionCoefficients;
+        vec3 viewRayTransmittance = exp(-densityAlongViewRay * scaledExtinctionCoefficients);
 
         if (max(viewRayTransmittance.r, max(viewRayTransmittance.g, viewRayTransmittance.b)) < 0.01) break;
 
         totalLight += inScatteredLight * viewRayTransmittance;
     }
+
+    if (all(greaterThan(totalLight, vec3(0.00001)))) totalLight += vec3(0.05);
 
     return totalLight;
 }

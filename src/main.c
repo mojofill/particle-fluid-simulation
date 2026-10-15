@@ -8,7 +8,7 @@
 #define NUM_BLOCKS_PER_WORKGROUP (1 << 7) // this is a parameter for radix sort
 // #define PAUSE_ON_START
 
-#define NUM_PARTICLES (1 << 18)
+#define NUM_PARTICLES 300000
 #define PARTICLE_RADIUS 0.3
 #define SMOOTHING_RADIUS 2.5
 #define DENSITY_CELL_SIZE 0.5 // dont change this idk why it doesnt work when not exactly smoothing radius
@@ -29,8 +29,8 @@
 #define SURFACE_DENSITY_THRESHOLD 0.75
 #define INDEX_OF_REFRACTION 1.333
 
-// #define RENDER_TYPE RASTERIZATION
-#define RENDER_TYPE RAYMARCH_FLUID
+#define RENDER_TYPE RASTERIZATION
+// #define RENDER_TYPE RAYMARCH_FLUID
 
 float volume; // initialize this during runtime
 
@@ -132,6 +132,7 @@ void scrollCallback(GLFWwindow* window, double xoffset, double yoffset) {
     int s = yoffset > 0 ? -1 : 1;
     vko->renderType = (vko->renderType + s) % RENDER_TYPE_COUNT;
     if (vko->renderType < 0) vko->renderType = RENDER_TYPE_COUNT - 1;
+    // uncomment this line to enabled volumetric shading
     if (vko->renderType == RAYMARCH_VOLUMETRIC) {
         vko->renderType = (vko->renderType + s) % RENDER_TYPE_COUNT;
         if (vko->renderType < 0) vko->renderType = RENDER_TYPE_COUNT - 1;
@@ -285,17 +286,10 @@ void testSort(vk_context *vko, void (*sortingFunction) (vk_context*, VkCommandBu
     void *srcData;
     vkMapMemory(vko->device, srcBufferMemory, 0, NUM_PARTICLES * sizeof(CellEntry), 0, &srcData);
     for (int i = 0; i < NUM_PARTICLES; i++) {
-        ((CellEntry*) srcData)[i] = (CellEntry) { .key = (int) (randf() * 5), .particleIndex = i };
+        ((CellEntry*) srcData)[i] = (CellEntry) { .key = i, .particleIndex = i };
     }
 
     shuffle((CellEntry*) srcData, NUM_PARTICLES);
-
-    printf("unsorted keys:\n");
-    printf("[");
-    for (int i = 0; i < NUM_PARTICLES - 1; i++) {
-        printf("%d, ", ((CellEntry*) srcData)[i].key);
-    }
-    printf("%d]\n", ((CellEntry*) srcData)[NUM_PARTICLES - 1].key);
 
     copyBuffer(vko, srcBuffer, vko->cellEntriesBuffers[vko->ping], NUM_PARTICLES * sizeof(CellEntry));
 
@@ -321,26 +315,6 @@ void testSort(vk_context *vko, void (*sortingFunction) (vk_context*, VkCommandBu
         VK_ACCESS_SHADER_READ_BIT
     );
 
-    // clear start indices
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vko->clearStartIndicesComputePipeline);
-    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vko->clearStartIndicesComputePipelineLayout, 0, 1, &vko->descriptorSets[vko->ping], 0, NULL);
-    vkCmdDispatch(commandBuffer, (vko->numParticles + 3) / 4, 1, 1);
-
-    createBufferMemoryBarrier(
-        vko,
-        vko->startIndicesBuffer,
-        commandBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_SHADER_WRITE_BIT,
-        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT // update start indices compute shader needs to write to this after (does not read)
-    );
-
-    // then update start indices
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vko->updateStartIndicesComputePipeline);
-    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, vko->updateStartIndicesComputePipelineLayout, 0, 1, &vko->descriptorSets[vko->ping], 0, NULL);
-    vkCmdDispatch(commandBuffer, (vko->numParticles + 3) / 4, 1, 1);
-
     endSingleTimeCommands(vko, commandBuffer);
 
     // now read cell entries
@@ -353,51 +327,14 @@ void testSort(vk_context *vko, void (*sortingFunction) (vk_context*, VkCommandBu
     void *data;
     vkMapMemory(vko->device, dstBufferMemory, 0, NUM_PARTICLES * sizeof(CellEntry), 0, &data);
     
-    printf("array should be sorted based on keys.\n");
-    printf("[");
-    for (int i = 0; i < NUM_PARTICLES - 1; i++) {
-        printf("(key=%d, particleIndex=%d), ", ((CellEntry*) data)[i].key, ((CellEntry*) data)[i].particleIndex);
-    }
-    printf("(key=%d, particleIndex=%d)]\n", ((CellEntry*) data)[NUM_PARTICLES - 1].key, ((CellEntry*) data)[NUM_PARTICLES - 1].particleIndex);
-
-    printf("just keys:\n");
+    printf("sorted array:\n");
     printf("[");
     for (int i = 0; i < NUM_PARTICLES - 1; i++) {
         printf("%d, ", ((CellEntry*) data)[i].key);
     }
     printf("%d]\n", ((CellEntry*) data)[NUM_PARTICLES - 1].key);
 
-    int sortedArray[NUM_PARTICLES];
-    for (int i = 0; i < NUM_PARTICLES; i++) {
-        sortedArray[((CellEntry*) data)[i].particleIndex] = ((CellEntry*) data)[i].key;
-    }
-
-    printf("sorted array:\n[");
-    for (int i = 0; i < NUM_PARTICLES - 1; i++) {
-        printf("%d, ", sortedArray[i]);
-    }
-    printf("%d]\n", sortedArray[NUM_PARTICLES - 1]);
-
-    vkUnmapMemory(vko->device, dstBufferMemory);
-    vkDestroyBuffer(vko->device, dstBuffer, NULL);
-    vkFreeMemory(vko->device, dstBufferMemory, NULL);
-
-    // now time to read the start indices
-    createBuffer(vko, NUM_PARTICLES * sizeof(int), VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &dstBuffer, &dstBufferMemory);
-    copyBuffer(vko, vko->startIndicesBuffer, dstBuffer, NUM_PARTICLES * sizeof(int));
-
-    void *startIndicesData;
-    vkMapMemory(vko->device, dstBufferMemory, 0, NUM_PARTICLES * sizeof(int), 0, &startIndicesData);
-
-    printf("start indices:\n[");
-    for (int i = 0; i < NUM_PARTICLES - 1; i++) {
-        printf("%d, ", ((int*) startIndicesData)[i]);
-    }
-    printf("%d]\n", ((int*) startIndicesData)[NUM_PARTICLES - 1]);
-
-    vkUnmapMemory(vko->device, dstBufferMemory);
-    vkDestroyBuffer(vko->device, dstBuffer, NULL);
-    vkFreeMemory(vko->device, dstBufferMemory, NULL);
+    exit(1);
 }
 
 void printArray(int *arr, int length) {
@@ -416,9 +353,9 @@ int main() {
     vko.numParticles = NUM_PARTICLES;
     vko.particleRadius = PARTICLE_RADIUS;
     
-    float s = 60;
-    vec3 minXYZ = {-1.0 * s, -1.00 * s, -1.00 * s};
-    vec3 maxXYZ = {1.0 * s, 1.00 * s, 1.00 * s};
+    float s = 40;
+    vec3 minXYZ = {-3.5 * s, -1.00 * s, -1.00 * s};
+    vec3 maxXYZ = {3.5 * s, 1.00 * s, 1.00 * s};
     
     vko.numSubsteps = NUM_SUBSTEPS;
     vko.smoothingRadius = SMOOTHING_RADIUS;
@@ -435,6 +372,12 @@ int main() {
         vko.readTimeStamps = 0;
     #endif
 
+    #ifdef TESTING
+        vko.testing = 1;
+    #else
+        vko.testing = 0;
+    #endif
+
     vko.numFramesRan = 0;
     vko.renderType = RENDER_TYPE;
 
@@ -443,8 +386,8 @@ int main() {
     vko.densityCellSize = DENSITY_CELL_SIZE;
     vko.lightMarchStepSize = LIGHT_MARCH_STEP_SIZE;
 
-    vec3 extinctionCoefficients = {0.025, 0.020, 0.015};
-    glm_vec3_scale(extinctionCoefficients, 0.25, extinctionCoefficients);
+    vec3 extinctionCoefficients = {2, 2, 1};
+    glm_vec3_scale(extinctionCoefficients, 0.005, extinctionCoefficients);
     // vec3 extinctionCoefficients = {3, 2, 1};
     // glm_vec3_scale(extinctionCoefficients, 0.01, extinctionCoefficients);
     vec3 dirToSun = {0.75, -0.25, 0.5};
@@ -452,19 +395,6 @@ int main() {
 
     glm_vec3_copy(extinctionCoefficients, vko.extinctionCoefficients);
     glm_vec3_copy(dirToSun, vko.dirToSun);
-
-    // if (!isPowerOfTwo(NUM_PARTICLES)) {
-    //     printf("NUM_PARTICLES must be a power of 2\n");
-    //     exit(1);
-    // }
-
-    /*
-    1. test spatial look up code for 3d (create a cellEntries buffer, where cellEntries[particleIndex] = cellKey). that belongs as its own compute shader
-    2. apply gravity, (optional: viscosity), and predict next positions (into a new buffer)
-    3. calculate densities
-    4. calculate and apply pressure forces on velocities
-    5. update positions and resolve collisions with bounding box
-    */
 
     glm_vec3_copy(minXYZ, vko.minXYZ);
     glm_vec3_copy(maxXYZ, vko.maxXYZ);

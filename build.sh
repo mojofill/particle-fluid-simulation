@@ -39,7 +39,8 @@ glslc src/shaders/properFluid.comp -o "$SPV_DIR/properFluid.spv"
 
 echo "Configuring CMake..."
 cmake -S . -B "$BUILD_DIR" \
-    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_C_COMPILER=C:/msys64/ucrt64/bin/gcc.exe \
+    -Dglfw3_DIR=C:/glfw-mingw/lib/cmake/glfw3
 
 echo "Building..."
 cmake --build "$BUILD_DIR" --parallel

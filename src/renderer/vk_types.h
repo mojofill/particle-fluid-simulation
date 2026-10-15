@@ -20,6 +20,7 @@ enum RenderTypes {
     RENDER_TYPE_COUNT
 };
 
+// technically this can be thought of as a key value pair
 typedef struct CellEntry {
     uint32_t key;
     uint32_t particleIndex;
@@ -206,6 +207,8 @@ typedef struct vk_context {
 
     int width;
     int height;
+
+    int testing;
 
     ivec3 raymarchCellSize;
     ivec3 lightVolumeSize;

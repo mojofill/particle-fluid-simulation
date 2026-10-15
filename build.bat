@@ -26,9 +26,7 @@ glslc src\shaders\properFluid.comp -o src\spvs\properFluid.spv
 echo Configuring CMake...
 cmake -S . -B build ^
   -G "MinGW Makefiles" ^
-  -DCMAKE_C_COMPILER=C:/MinGW/bin/gcc.exe ^
-  -DCMAKE_MAKE_PROGRAM=C:/MinGW/bin/mingw32-make.exe ^
-  -DCMAKE_BUILD_TYPE=Release ^
+  -DCMAKE_C_COMPILER=C:/msys64/ucrt64/bin/gcc.exe ^
   -Dglfw3_DIR=C:/glfw-mingw/lib/cmake/glfw3
 
 echo Building...

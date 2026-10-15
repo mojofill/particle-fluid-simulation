@@ -13,6 +13,8 @@ static void initWindow(vk_context *vko) {
     GLFWmonitor *monitor = glfwGetPrimaryMonitor();
     const GLFWvidmode* mode = glfwGetVideoMode(monitor);
 
+    if (vko->testing) monitor = NULL;
+
     vko->window = glfwCreateWindow(mode->width, mode->height, "Fluid Particle Simulation", monitor, NULL);
     vko->width = mode->width;
     vko->height = mode->height;
@@ -113,7 +115,7 @@ static void createInstance(vk_context *vko) {
     if (res != VK_SUCCESS) {
         fprintf(stderr, "vkCreateInstance failed: %d\n", res);
         exit(1);
-    }    
+    }
 }
 
 static void createSurface(vk_context *vko) {
@@ -124,12 +126,75 @@ static void createSurface(vk_context *vko) {
 }
 
 static void pickPhysicalDevice(vk_context *vko) {
-    uint32_t physicalDeviceCount;
+    uint32_t physicalDeviceCount = 0;
+
     vkEnumeratePhysicalDevices(vko->instance, &physicalDeviceCount, NULL);
-    VkPhysicalDevice *physicalDevices = malloc(sizeof(VkPhysicalDevice) * physicalDeviceCount);
+
+    if (physicalDeviceCount == 0) {
+        fprintf(stderr, "No Vulkan-capable GPUs found.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    VkPhysicalDevice *physicalDevices =
+        malloc(sizeof(VkPhysicalDevice) * physicalDeviceCount);
+
     vkEnumeratePhysicalDevices(vko->instance, &physicalDeviceCount, physicalDevices);
 
-    vko->physicalDevice = physicalDevices[0]; // Pick first physical device found
+    // printf("Found %u graphics device(s):\n", physicalDeviceCount);
+
+    int bestDevice = -1;
+    int bestScore = -1;
+
+    for (uint32_t i = 0; i < physicalDeviceCount; i++) {
+        VkPhysicalDeviceProperties properties;
+        vkGetPhysicalDeviceProperties(physicalDevices[i], &properties);
+
+        int score = 0;
+        // printf("  [%u] %s\n", i, properties.deviceName);
+
+        switch (properties.deviceType) {
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+                score += 1000;
+                break;
+
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+                score += 500;
+                break;
+
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+                score += 300;
+                break;
+
+            case VK_PHYSICAL_DEVICE_TYPE_CPU:
+                score += 100;
+                break;
+
+            default:
+                break;
+        }
+
+        // Prefer newer Vulkan versions.
+        score += properties.apiVersion;
+
+        if (score > bestScore) {
+            bestScore = score;
+            bestDevice = i;
+        }
+    }
+
+    if (bestDevice == -1) {
+        fprintf(stderr, "Failed to select a physical device.\n");
+        free(physicalDevices);
+        exit(EXIT_FAILURE);
+    }
+
+    vko->physicalDevice = physicalDevices[bestDevice];
+
+    VkPhysicalDeviceProperties selectedProperties;
+    vkGetPhysicalDeviceProperties(vko->physicalDevice, &selectedProperties);
+
+    printf("Selected GPU: %s\n", selectedProperties.deviceName);
+
     free(physicalDevices);
 }
 
@@ -188,14 +253,15 @@ static void createLogicalDevice(vk_context *vko) {
     deviceFeatures.samplerAnisotropy = VK_TRUE; // must add device feature sampler anisotropy
     deviceFeatures.fillModeNonSolid = VK_TRUE;
 
-    VkPhysicalDeviceVulkan12Features v12Features = {0};
-    v12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-    v12Features.separateDepthStencilLayouts = VK_TRUE;
+    VkPhysicalDeviceVulkan12Features features12 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+        .separateDepthStencilLayouts = VK_TRUE
+    };
 
     // create logical device
     VkDeviceCreateInfo deviceCreateInfo = {0};
     deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceCreateInfo.pNext = &v12Features;
+    deviceCreateInfo.pNext = &features12;
     deviceCreateInfo.queueCreateInfoCount = 1;
     deviceCreateInfo.pQueueCreateInfos = queueCreateInfos;
     deviceCreateInfo.enabledExtensionCount = extensionCount;
@@ -504,7 +570,7 @@ void initializePositionsBuffer(vk_context *vko) {
     vec4 *positions = malloc(vko->numParticles * sizeof(vec4));
     for (int i = 0; i < vko->numParticles; i++) {
         // use a bounding box
-        float scale_x = 0.45;
+        float scale_x = 0.25;
         float scale_y = 0.45;
         float scale_z = 0.45;
         vec4 pos = {
@@ -573,7 +639,7 @@ void initializeVelocitiesBuffer(vk_context *vko) {
         //     0
         // };
 
-        vec4 velocity = {0, 0, -60, 0};
+        vec4 velocity = {0, 0, -100, 0};
 
         glm_vec4_copy(velocity, velocities[i]);
     }

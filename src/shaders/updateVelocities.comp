@@ -78,35 +78,37 @@ void main() {
     vel += vec3(0, 0, -g) * dt;
     pos += vel * dt * dt_scale;
 
-    if (pos.x < minXYZ.x + particleRadius) {
-        pos.x = minXYZ.x + particleRadius;
+    float _particleRadius = particleRadius + 0.5;
+
+    if (pos.x < minXYZ.x + _particleRadius) {
+        pos.x = minXYZ.x + _particleRadius;
         vel.x *= -1;
         vel *= 1.00;
     }
-    else if (pos.x > maxXYZ.x - particleRadius) {
-        pos.x = maxXYZ.x - particleRadius;
+    else if (pos.x > maxXYZ.x - _particleRadius) {
+        pos.x = maxXYZ.x - _particleRadius;
         vel.x *= -1;
         vel *= 1.00;
     }
 
-    if (pos.y < minXYZ.y + particleRadius) {
-        pos.y = minXYZ.y + particleRadius;
+    if (pos.y < minXYZ.y + _particleRadius) {
+        pos.y = minXYZ.y + _particleRadius;
         vel.y *= -1;
         vel *= 1.00;
     }
-    else if (pos.y > maxXYZ.y - particleRadius) {
-        pos.y = maxXYZ.y - particleRadius;
+    else if (pos.y > maxXYZ.y - _particleRadius) {
+        pos.y = maxXYZ.y - _particleRadius;
         vel.y *= -1;
         vel *= 1.00;
     }
 
-    if (pos.z < minXYZ.z + particleRadius) {
-        pos.z = minXYZ.z + particleRadius;
+    if (pos.z < minXYZ.z + _particleRadius) {
+        pos.z = minXYZ.z + _particleRadius;
         vel.z *= -1;
         vel.z *= 0.95;
     }
-    else if (pos.z > maxXYZ.z - particleRadius) {
-        pos.z = maxXYZ.z - particleRadius;
+    else if (pos.z > maxXYZ.z - _particleRadius) {
+        pos.z = maxXYZ.z - _particleRadius;
         vel.z *= -1;
         vel *= 1.00;
         // dont reduce energy coming from top
@@ -116,7 +118,7 @@ void main() {
     positions[particleIndex] = vec4(pos, 1);
 
     float speed = length(vel);
-    float t = clamp(speed / 30.0, 0.0, 1.0);
+    float t = clamp(speed / 60.0, 0.0, 1.0);
 
     vec3 color;
 
